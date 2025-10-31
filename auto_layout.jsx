@@ -21,7 +21,7 @@
       default_object_style: "",
       fallback_object_style: ""
     },
-    export: {
+    "export": {
       pdf_per_page: false,
       pdf_preset_name: "Smallest File Size"
     },
@@ -822,7 +822,8 @@
 
     csv.close();
 
-    if (config.export && config.export.pdf_per_page) {
+    var exportConfig = config["export"];
+    if (exportConfig && exportConfig.pdf_per_page) {
       var pdfFolder = ensureFolder(Folder(root.fsName + "/muestras"));
       var processedUnique = {};
       for (var pp = 0; pp < processedPages.length; pp++) {
@@ -836,7 +837,7 @@
         }
         processedUnique[key] = true;
         var pdfFile = File(pdfFolder.fsName + "/" + (page.documentOffset + 1) + ".pdf");
-        var err = exportPagePDF(doc, page, pdfFile, config.export.pdf_preset_name);
+        var err = exportPagePDF(doc, page, pdfFile, exportConfig.pdf_preset_name);
         if (err) {
           $.writeln("PDF export warning: " + err);
         }
