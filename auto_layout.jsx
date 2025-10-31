@@ -165,17 +165,27 @@
 
   function importDocxToScratchStory(doc, file, importPrefs) {
     var tf = createScratchFrame(doc);
-    var prefs = app.wordImportPreferences;
+    var prefs = null;
     var previous = {};
     try {
-      for (var key in importPrefs) {
-        if (importPrefs.hasOwnProperty(key)) {
-          previous[key] = prefs[key];
-          prefs[key] = importPrefs[key];
-        }
+      if (typeof app.wordImportPreferences !== "undefined") {
+        prefs = app.wordImportPreferences;
+      } else if (typeof app.wordRTFImportPreferences !== "undefined") {
+        prefs = app.wordRTFImportPreferences;
       }
-    } catch (e) {
-      $.writeln("word prefs: " + e);
+    } catch (_) {}
+
+    if (prefs) {
+      try {
+        for (var key in importPrefs) {
+          if (importPrefs.hasOwnProperty(key)) {
+            previous[key] = prefs[key];
+            prefs[key] = importPrefs[key];
+          }
+        }
+      } catch (e) {
+        $.writeln("word prefs: " + e);
+      }
     }
     try {
       tf.place(file);
@@ -186,11 +196,13 @@
       try { tf.remove(); } catch (_remove) {}
       return null;
     } finally {
-      try {
-        for (var key2 in previous) {
-          prefs[key2] = previous[key2];
-        }
-      } catch (e2) {}
+      if (prefs) {
+        try {
+          for (var key2 in previous) {
+            prefs[key2] = previous[key2];
+          }
+        } catch (e2) {}
+      }
     }
   }
 
