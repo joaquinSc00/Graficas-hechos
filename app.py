@@ -36,15 +36,21 @@ def layout():
         title_pt = title_base
         action = "keep"
 
-        if chars > 1800:
-            body_pt = clamp(body_base - 0.5, body_min, body_max)
-            action = "expand_frame"
-        elif chars > 1400:
-            body_pt = clamp(body_base - 0.25, body_min, body_max)
-            action = "tighten"
-        elif chars < 900 and not has_photo:
-            body_pt = clamp(body_base + 0.25, body_min, body_max)
-            action = "loosen"
+        unplaced_flag = bool(note.get("unplaced", False))
+        has_frame = note.get("hasFrame", True)
+
+        if unplaced_flag or has_frame is False:
+            action = "unplaced"
+        else:
+            if chars > 1800:
+                body_pt = clamp(body_base - 0.5, body_min, body_max)
+                action = "expand_frame_first"
+            elif 1400 <= chars <= 1800:
+                body_pt = clamp(body_base - 0.25, body_min, body_max)
+                action = "tighten"
+            elif chars < 900 and not has_photo:
+                body_pt = clamp(body_base + 0.25, body_min, body_max)
+                action = "loosen"
 
         body_pt = clamp(body_pt, body_min, body_max)
         title_pt = clamp(title_pt, title_min, title_max)
