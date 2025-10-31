@@ -910,7 +910,9 @@
           csv.writeData(NOTE_COLUMNS, {pagina: pf.name, note_id: "-", warnings: "duplicate_page_failed"});
           continue;
         }
-        duplicate.name = pageNames[p];
+        try {
+          duplicate.label = pageNames[p];
+        } catch (_setLabelErr) {}
         contexts[pageNames[p]] = {
           page: duplicate,
           usedLabels: {},
