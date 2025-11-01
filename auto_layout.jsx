@@ -195,15 +195,41 @@
     if (!root || !root.exists) {
       return [];
     }
-    var items = root.getFiles();
     var folders = [];
-    for (var i = 0; i < items.length; i++) {
-      if (items[i] instanceof Folder && /\d+/.test(items[i].name)) {
-        folders.push(items[i]);
+
+    function walk(folder) {
+      if (!folder || !folder.exists) {
+        return;
+      }
+      var items = folder.getFiles();
+      var hasDocx = false;
+      var subfolders = [];
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        if (item instanceof Folder) {
+          subfolders.push(item);
+        } else if (item instanceof File && /\.docx$/i.test(item.name)) {
+          hasDocx = true;
+        }
+      }
+      if (hasDocx && /\d+/.test(folder.name)) {
+        folders.push(folder);
+      }
+      for (var j = 0; j < subfolders.length; j++) {
+        walk(subfolders[j]);
       }
     }
+
+    walk(root);
     folders.sort(function (a, b) {
-      return a.name > b.name ? 1 : (a.name < b.name ? -1 : 0);
+      var nameA = a && a.name ? a.name : "";
+      var nameB = b && b.name ? b.name : "";
+      if (nameA === nameB) {
+        var pathA = a && a.fullName ? a.fullName : "";
+        var pathB = b && b.fullName ? b.fullName : "";
+        return pathA > pathB ? 1 : (pathA < pathB ? -1 : 0);
+      }
+      return nameA > nameB ? 1 : -1;
     });
     return folders;
   }
