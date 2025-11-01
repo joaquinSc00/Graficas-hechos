@@ -17,18 +17,6 @@
       body_max_drop_pt: 0.5,
       title_max_drop_pt: 0.5
     },
-    layout_solver: {
-      enabled: true,
-      max_attempts_small: 6,
-      max_attempts_medium: 30,
-      max_attempts_large: 120,
-      strategy: "best_first",
-      photo: {
-        two_col_w_cm: 10.145,
-        min_h_cm: 5.35,
-        slot_strict: true
-      }
-    },
     images: {
       default_object_style: "",
       fallback_object_style: ""
@@ -45,12 +33,11 @@
   var CSV_COLUMNS = [
     "pagina",
     "nota",
-    "slot_usado",
-    "ancho_col",
-    "alto_final",
-    "pt_titulo",
-    "pt_cuerpo",
-    "overflow_chars",
+    "chars",
+    "body_pt",
+    "title_pt",
+    "overset",
+    "excedente_aprox",
     "warnings",
     "errors"
   ];
@@ -104,67 +91,6 @@
       $.writeln("Config error: " + e);
     }
     return cfg;
-  }
-
-  function pointsFromCm(value) {
-    if (!value && value !== 0) {
-      return 0;
-    }
-    return value * 28.34645669;
-  }
-
-  function readLayoutSlotsReport(file) {
-    var out = {};
-    if (!file || !file.exists) {
-      return out;
-    }
-    var data = null;
-    try {
-      file.open("r");
-      var raw = file.read();
-      file.close();
-      if (raw && raw.length) {
-        data = JSON.parse(raw);
-      }
-    } catch (e) {
-      try { file.close(); } catch (_) {}
-      $.writeln("layout_slots_report read error: " + e);
-      return out;
-    }
-
-    if (!data || !(data instanceof Array)) {
-      return out;
-    }
-
-    var perPageCounter = {};
-    for (var i = 0; i < data.length; i++) {
-      var slot = data[i];
-      if (!slot || typeof slot.page === "undefined") {
-        continue;
-      }
-      var pageKey = String(slot.page);
-      if (!out[pageKey]) {
-        out[pageKey] = [];
-        perPageCounter[pageKey] = 0;
-      }
-      perPageCounter[pageKey]++;
-      var width = slot.w_pt ? slot.w_pt : pointsFromCm(slot.w_cm || 0);
-      var height = slot.h_pt ? slot.h_pt : pointsFromCm(slot.h_cm || 0);
-      var x = slot.x_pt ? slot.x_pt : pointsFromCm(slot.x_cm || 0);
-      var y = slot.y_pt ? slot.y_pt : pointsFromCm(slot.y_cm || 0);
-      var bounds = [y, x, y + height, x + width];
-      out[pageKey].push({
-        id: slot.id ? slot.id : (pageKey + "_slot" + perPageCounter[pageKey]),
-        page: slot.page,
-        bounds: bounds,
-        width: width,
-        height: height,
-        raw: slot,
-        isPhoto: slot.is_photo_slot || slot.is_2col_photo_slot || false,
-        fitsPhoto2ColHeight: slot.fits_photo_2col_h || false
-      });
-    }
-    return out;
   }
 
   function selectRootFolder() {
@@ -473,20 +399,14 @@
     story.recompose();
   }
 
-  function expandFrameHeightMM(textFrame, delta, limitBottom) {
+  function expandFrameHeightMM(textFrame, delta) {
     if (!textFrame || !textFrame.isValid || !delta) {
       return;
     }
     var pts = delta * 2.834645669;
     try {
       var gb = textFrame.geometricBounds;
-      var nextBottom = gb[2] + pts;
-      if (limitBottom !== undefined && limitBottom !== null) {
-        if (nextBottom > limitBottom) {
-          nextBottom = limitBottom;
-        }
-      }
-      gb[2] = nextBottom;
+      gb[2] = gb[2] + pts;
       textFrame.geometricBounds = gb;
       textFrame.parentStory.recompose();
     } catch (e) {
@@ -565,7 +485,7 @@
     return "";
   }
 
-  function resolveOverset(bodyFrame, titleFrame, cfg, stylesCfg, limits) {
+  function resolveOverset(bodyFrame, titleFrame, cfg, stylesCfg) {
     var result = {
       overset: "",
       exceed: 0,
@@ -590,7 +510,7 @@
     var expanded = 0;
     while (info.over && expanded < cfg.max_expand_mm) {
       var step = Math.min(2, cfg.max_expand_mm - expanded);
-      expandFrameHeightMM(bodyFrame, step, limits && limits.bodyMaxBottom !== undefined ? limits.bodyMaxBottom : null);
+      expandFrameHeightMM(bodyFrame, step);
       expanded += step;
       info = storyOversetInfo(story);
     }
@@ -608,458 +528,29 @@
       }
     }
 
-    if (info.over) {
-      var titleContainer = null;
-      if (titleFrame && titleFrame.isValid) {
-        titleContainer = titleFrame;
-      } else {
-        titleContainer = bodyFrame;
-      }
-      if (titleContainer && titleContainer.isValid) {
-        var titleStory = titleContainer.parentStory;
-        var titleDropped = 0;
-        while (info.over && titleDropped < cfg.title_max_drop_pt) {
-          var tDelta = -Math.min(cfg.body_step_pt, cfg.title_max_drop_pt - titleDropped);
-          var appliedTitle = nudgeStyle(titleContainer, stylesCfg.title.name, tDelta, stylesCfg.title.pt_min, stylesCfg.title.pt_max);
-          if (appliedTitle === null) {
-            break;
-          }
-          titleDropped += Math.abs(tDelta);
-          titleStory.recompose();
-          info = storyOversetInfo(story);
+    if (info.over && titleFrame && titleFrame.isValid) {
+      var titleStory = titleFrame.parentStory;
+      var titleDropped = 0;
+      while (info.over && titleDropped < cfg.title_max_drop_pt) {
+        var tDelta = -Math.min(cfg.body_step_pt, cfg.title_max_drop_pt - titleDropped);
+        var appliedTitle = nudgeStyle(titleFrame, stylesCfg.title.name, tDelta, stylesCfg.title.pt_min, stylesCfg.title.pt_max);
+        if (appliedTitle === null) {
+          break;
         }
+        titleDropped += Math.abs(tDelta);
+        titleStory.recompose();
+        info = storyOversetInfo(story);
       }
     }
 
     info = storyOversetInfo(story);
     result.exceed = info.exceed;
     result.bodyPointSize = currentStylePointSize(bodyFrame, stylesCfg.body.name);
-    result.titlePointSize = currentStylePointSize(titleFrame && titleFrame.isValid ? titleFrame : bodyFrame, stylesCfg.title.name);
+    result.titlePointSize = titleFrame ? currentStylePointSize(titleFrame, stylesCfg.title.name) : result.titlePointSize;
     if (info.over) {
       result.overset = "overset_hard";
     }
     return result;
-  }
-
-  function toCm(points) {
-    return points / 28.34645669;
-  }
-
-  function formatNumber(value, decimals) {
-    var factor = Math.pow(10, decimals || 2);
-    return Math.round(value * factor) / factor;
-  }
-
-  function cloneBounds(bounds) {
-    if (!bounds) {
-      return null;
-    }
-    return [bounds[0], bounds[1], bounds[2], bounds[3]];
-  }
-
-  function slotsForPage(slotsMap, page) {
-    if (!slotsMap || !page || !page.isValid) {
-      return [];
-    }
-    var nameKey = String(page.name);
-    if (slotsMap.hasOwnProperty(nameKey)) {
-      return slotsMap[nameKey].slice(0);
-    }
-    var indexKey = String(page.documentOffset + 1);
-    if (slotsMap.hasOwnProperty(indexKey)) {
-      return slotsMap[indexKey].slice(0);
-    }
-    return [];
-  }
-
-  function splitSlotsByType(slots) {
-    var out = { text: [], photo: [] };
-    if (!slots) {
-      return out;
-    }
-    for (var i = 0; i < slots.length; i++) {
-      var slot = slots[i];
-      if (!slot) {
-        continue;
-      }
-      if (slot.isPhoto) {
-        out.photo.push(slot);
-      } else {
-        out.text.push(slot);
-      }
-    }
-    return out;
-  }
-
-  function generateSlotPermutations(slots, noteCount, limit) {
-    var combos = [];
-    var choose = Math.min(noteCount, slots.length);
-    if (choose <= 0) {
-      combos.push([]);
-      return combos;
-    }
-
-    var used = {};
-    function step(prefix) {
-      if (combos.length >= limit) {
-        return;
-      }
-      if (prefix.length === choose) {
-        var finalCombo = prefix.slice(0);
-        while (finalCombo.length < noteCount) {
-          finalCombo.push(-1);
-        }
-        combos.push(finalCombo);
-        return;
-      }
-      for (var si = 0; si < slots.length; si++) {
-        if (used[si]) {
-          continue;
-        }
-        used[si] = true;
-        prefix.push(si);
-        step(prefix);
-        prefix.pop();
-        used[si] = false;
-        if (combos.length >= limit) {
-          break;
-        }
-      }
-    }
-
-    step([]);
-
-    if (!combos.length) {
-      combos.push([]);
-    }
-    return combos;
-  }
-
-  function LayoutSolver(page, slots, config, stylesCfg) {
-    this.page = page;
-    this.slots = slots.slice(0);
-    this.config = config;
-    this.stylesCfg = stylesCfg;
-    this.sizeProfiles = this.buildSizeProfiles();
-  }
-
-  LayoutSolver.prototype.determineMaxAttempts = function (noteCount) {
-    var solverCfg = this.config.layout_solver || {};
-    if (noteCount <= 1) {
-      return solverCfg.max_attempts_small || 6;
-    }
-    if (noteCount === 2) {
-      return solverCfg.max_attempts_small || 6;
-    }
-    if (noteCount <= 4) {
-      return solverCfg.max_attempts_medium || 30;
-    }
-    return solverCfg.max_attempts_large || 120;
-  };
-
-  LayoutSolver.prototype.buildSizeProfiles = function () {
-    var profiles = [];
-    var body = this.stylesCfg.body;
-    var title = this.stylesCfg.title;
-    var bodyStep = this.config.overset.body_step_pt || 0.25;
-    var deltas = [0, -bodyStep, bodyStep, -2 * bodyStep];
-    var titleDeltas = [0, -0.5, 0.5];
-    var added = {};
-
-    function clamp(val, min, max) {
-      if (val < min) return min;
-      if (val > max) return max;
-      return val;
-    }
-
-    for (var i = 0; i < deltas.length; i++) {
-      var bodyPt = clamp(body.pt_base + deltas[i], body.pt_min, body.pt_max);
-      for (var j = 0; j < titleDeltas.length; j++) {
-        var titlePt = clamp(title.pt_base + titleDeltas[j], title.pt_min, title.pt_max);
-        var key = bodyPt + "_" + titlePt;
-        if (!added[key]) {
-          profiles.push({ body: bodyPt, title: titlePt });
-          added[key] = true;
-        }
-      }
-    }
-
-    if (!profiles.length) {
-      profiles.push({ body: body.pt_base, title: title.pt_base });
-    }
-    return profiles;
-  };
-
-  LayoutSolver.prototype.evaluateAssignment = function (notes, assignment, profile) {
-    var attempt = {
-      noteResults: [],
-      totalOverflow: 0,
-      success: true
-    };
-    var createdFrames = [];
-    var oversetCfg = this.config.overset || {};
-
-    for (var ni = 0; ni < notes.length; ni++) {
-      var note = notes[ni];
-      var slotIndex = assignment[ni];
-      if (slotIndex === undefined || slotIndex === null) {
-        slotIndex = -1;
-      }
-      var slot = slotIndex >= 0 && slotIndex < this.slots.length ? this.slots[slotIndex] : null;
-      if (!slot) {
-        attempt.success = false;
-        attempt.noteResults.push({
-          note: note,
-          slot: null,
-          overset: { overset: "overset_hard", exceed: note.bodyText ? note.bodyText.length : 0 },
-          warnings: ["slot_missing"],
-          bodyPointSize: profile.body,
-          titlePointSize: profile.title,
-          bodyBounds: null,
-          columnWidth: 0,
-          totalHeight: 0
-        });
-        continue;
-      }
-
-      var frame = this.page.textFrames.add();
-      frame.geometricBounds = [slot.bounds[0], slot.bounds[1], slot.bounds[2], slot.bounds[3]];
-      frame.label = note.noteId + "_texto_temp";
-      createdFrames.push(frame);
-
-      var fullText = note.bodyText || "";
-      if (note.titleText) {
-        if (fullText) {
-          fullText = note.titleText + "\r" + fullText;
-        } else {
-          fullText = note.titleText;
-        }
-      }
-
-      var story = writeStory(frame, fullText);
-      if (story && story.isValid) {
-        applyStyleAndSize(story, this.stylesCfg.body.name, profile.body, this.stylesCfg.body.pt_min, this.stylesCfg.body.pt_max);
-        if (note.titleText) {
-          applyStyleToFirstParagraph(story, this.stylesCfg.title.name, profile.title, this.stylesCfg.title.pt_min, this.stylesCfg.title.pt_max);
-        }
-      }
-
-      var overset = resolveOverset(frame, null, oversetCfg, this.stylesCfg, { bodyMaxBottom: slot.bounds[2] });
-      attempt.totalOverflow += overset.exceed;
-      if (overset.overset === "overset_hard") {
-        attempt.success = false;
-      }
-
-      attempt.noteResults.push({
-        note: note,
-        slot: slot,
-        overset: overset,
-        warnings: [],
-        bodyPointSize: overset.bodyPointSize || profile.body,
-        titlePointSize: overset.titlePointSize || profile.title,
-        bodyBounds: frame.geometricBounds.slice(0),
-        columnWidth: slot.width,
-        totalHeight: frame.geometricBounds[2] - frame.geometricBounds[0]
-      });
-    }
-
-    for (var ci = createdFrames.length - 1; ci >= 0; ci--) {
-      try {
-        if (createdFrames[ci] && createdFrames[ci].isValid) {
-          createdFrames[ci].remove();
-        }
-      } catch (_) {}
-    }
-
-    return attempt;
-  };
-
-  LayoutSolver.prototype.solve = function (notes) {
-    var result = {
-      noteResults: [],
-      success: false,
-      totalOverflow: 0
-    };
-    if (!notes || !notes.length) {
-      result.success = true;
-      return result;
-    }
-
-    var maxAttempts = this.determineMaxAttempts(notes.length);
-    var combos = generateSlotPermutations(this.slots, notes.length, maxAttempts);
-    var profiles = this.sizeProfiles;
-    var solverCfg = this.config.layout_solver || {};
-    var best = null;
-    var attempts = 0;
-
-    for (var ci = 0; ci < combos.length && attempts < maxAttempts; ci++) {
-      for (var pi = 0; pi < profiles.length && attempts < maxAttempts; pi++) {
-        var attempt = this.evaluateAssignment(notes, combos[ci], profiles[pi]);
-        attempts++;
-        if (!best) {
-          best = attempt;
-        } else {
-          if (attempt.success && !best.success) {
-            best = attempt;
-          } else if (attempt.success === best.success) {
-            if (attempt.totalOverflow < best.totalOverflow) {
-              best = attempt;
-            }
-          }
-        }
-        if (attempt.success && solverCfg.strategy === "best_first") {
-          best = attempt;
-          ci = combos.length;
-          break;
-        }
-      }
-    }
-
-    if (!best) {
-      best = {
-        noteResults: [],
-        success: false,
-        totalOverflow: 0
-      };
-    }
-
-    return best;
-  };
-
-  function removeItemsByLabel(page, label) {
-    if (!page || !page.isValid || !label) {
-      return;
-    }
-    var items = page.allPageItems;
-    for (var i = items.length - 1; i >= 0; i--) {
-      try {
-        if (items[i] && items[i].isValid && items[i].label === label) {
-          items[i].remove();
-        }
-      } catch (_) {}
-    }
-  }
-
-  function createTextFrameForBounds(page, bounds, label) {
-    if (!page || !page.isValid || !bounds) {
-      return null;
-    }
-    var frame = page.textFrames.add();
-    frame.geometricBounds = cloneBounds(bounds);
-    if (label) {
-      frame.label = label;
-    }
-    frame.textFramePreferences.autoSizingReferencePoint = AutoSizingReferenceEnum.TOP_LEFT_POINT;
-    return frame;
-  }
-
-  function ensureOversetSwatch(doc) {
-    var name = "AutoLayoutOversetRed";
-    if (!doc || !doc.isValid) {
-      return null;
-    }
-    try {
-      var existing = doc.colors.itemByName(name);
-      if (existing && existing.isValid) {
-        return existing;
-      }
-    } catch (_) {}
-    try {
-      return doc.colors.add({ name: name, model: ColorModel.PROCESS, space: ColorSpace.CMYK, colorValue: [0, 100, 100, 0] });
-    } catch (e) {
-      try {
-        var swatch = doc.swatches.itemByName("[Black]");
-        if (swatch && swatch.isValid) {
-          return swatch;
-        }
-      } catch (_) {}
-    }
-    return null;
-  }
-
-  function markOversetFrame(frame) {
-    if (!frame || !frame.isValid) {
-      return;
-    }
-    try {
-      var doc = app.activeDocument;
-      var swatch = ensureOversetSwatch(doc);
-      frame.strokeWeight = 2;
-      if (swatch && swatch.isValid) {
-        frame.strokeColor = swatch;
-      }
-      frame.strokeTint = 100;
-      frame.strokeType = doc.strokeStyles.itemByName("Solid");
-    } catch (_) {}
-  }
-
-  function applyImageToFrame(frame, photoFile, config, warnings) {
-    if (!frame || !frame.isValid || !photoFile) {
-      return;
-    }
-    try {
-      var appliedStyle = false;
-      if (config.images.default_object_style) {
-        try {
-          var style = app.activeDocument.objectStyles.itemByName(config.images.default_object_style);
-          if (style && style.isValid) {
-            frame.appliedObjectStyle = style;
-            appliedStyle = true;
-          }
-        } catch (_) {}
-      }
-      if (!appliedStyle && config.images.fallback_object_style) {
-        try {
-          var fb = app.activeDocument.objectStyles.itemByName(config.images.fallback_object_style);
-          if (fb && fb.isValid) {
-            frame.appliedObjectStyle = fb;
-            appliedStyle = true;
-          }
-        } catch (_) {}
-      }
-      frame.place(photoFile);
-      frame.fit(FitOptions.PROPORTIONALLY);
-      frame.fit(FitOptions.CENTER_CONTENT);
-    } catch (e) {
-      if (warnings) {
-        warnings.push("place_fail:" + photoFile.displayName);
-      }
-    }
-  }
-
-  function placeNoteImages(note, page, photoSlots, config, warnings) {
-    if (!note || !note.images || !note.images.length) {
-      return;
-    }
-    var solverPhotoCfg = config.layout_solver && config.layout_solver.photo ? config.layout_solver.photo : {};
-    for (var i = 0; i < note.images.length; i++) {
-      var photo = note.images[i];
-      var slot = null;
-      for (var si = 0; si < photoSlots.length; si++) {
-        if (!photoSlots[si].used) {
-          slot = photoSlots[si];
-          photoSlots[si].used = true;
-          break;
-        }
-      }
-      if (!slot) {
-        if (warnings) {
-          warnings.push("photo_slot_missing:" + note.noteId);
-        }
-        continue;
-      }
-      if (solverPhotoCfg.slot_strict && !slot.isPhoto) {
-        if (warnings) {
-          warnings.push("photo_slot_nonphoto:" + slot.id);
-        }
-      }
-      var bounds = cloneBounds(slot.bounds);
-      removeItemsByLabel(page, note.noteId + "_foto" + photo.index);
-      var frame = page.rectangles.add();
-      frame.geometricBounds = bounds;
-      frame.label = note.noteId + "_foto" + photo.index;
-      applyImageToFrame(frame, photo.file, config, warnings);
-    }
   }
 
   function ensureFolder(folder) {
@@ -1176,7 +667,6 @@
     }
 
     var config = readConfig(File(root.fsName + "/config.json"));
-    var layoutSlots = readLayoutSlotsReport(File(root.fsName + "/layout_slots_report.json"));
     var csvPath = File(root.fsName + "/reporte.csv");
     var csv = new CsvLogger(csvPath, CSV_COLUMNS);
     var processedPages = [];
@@ -1200,26 +690,17 @@
       });
 
       if (!docxFiles || docxFiles.length === 0) {
-        var warnNoDoc = warnings.slice(0);
-        warnNoDoc.push("no_docx_found");
+        warnings.push("no_docx_found");
         csv.writeRow({
           pagina: numbers.join("-"),
           nota: "",
-          slot_usado: "",
-          ancho_col: "",
-          alto_final: "",
-          pt_titulo: "",
-          pt_cuerpo: "",
-          overflow_chars: "",
-          warnings: warnNoDoc.join(";"),
-          errors: "",
+          warnings: warnings.join(";"),
+          errors: ""
         });
-        continue;
       }
 
       var noteCounter = 0;
       var imagesMap = collectImages(pageFolder);
-      var notesData = [];
 
       for (var df = 0; df < docxFiles.length; df++) {
         var docxFile = docxFiles[df];
@@ -1238,14 +719,8 @@
           csv.writeRow({
             pagina: numbers.join("-"),
             nota: docxFile.displayName,
-            slot_usado: "",
-            ancho_col: "",
-            alto_final: "",
-            pt_titulo: "",
-            pt_cuerpo: "",
-            overflow_chars: "",
             warnings: warnCopy.join(";"),
-            errors: "",
+            errors: ""
           });
           disposeScratch(scratch);
           continue;
@@ -1254,163 +729,106 @@
         for (var si = 0; si < segments.length; si++) {
           noteCounter++;
           var noteId = "nota" + noteCounter;
+          var noteWarnings = warnings.slice(0);
           var titleText = segments[si].titleText || "";
           var bodyText = segments[si].bodyText || "";
-          var noteWarnings = warnings.slice(0);
-          var noteImages = imagesMap[noteCounter] || [];
-          notesData.push({
-            noteId: noteId,
-            titleText: titleText,
-            bodyText: bodyText,
-            warnings: noteWarnings,
-            images: noteImages,
-            pageLabel: numbers.join("-"),
-          });
+
+          var textFrame = findLabeledItem(pages, noteId + "_texto");
+          var titleFrame = findLabeledItem(pages, noteId + "_titulo");
+
+          if (!textFrame || !textFrame.isValid) {
+            noteWarnings.push("text_frame_missing:" + noteId + "_texto");
+            csv.writeRow({
+              pagina: numbers.join("-"),
+              nota: noteId,
+              chars: bodyText.length + titleText.length,
+              warnings: noteWarnings.join(";"),
+              errors: ""
+            });
+            continue;
+          }
+
+          var fullText = bodyText;
+          var titleStory = null;
+
+          if (titleFrame && titleFrame.isValid) {
+            titleStory = writeStory(titleFrame, titleText);
+            applyStyleAndSize(titleStory, config.styles.title.name, config.styles.title.pt_base, config.styles.title.pt_min, config.styles.title.pt_max);
+          } else if (titleText) {
+            fullText = titleText + "\r" + (bodyText || "");
+            noteWarnings.push("title_frame_missing:" + noteId + "_titulo");
+          }
+
+          var bodyStory = writeStory(textFrame, fullText);
+          if (titleFrame && titleFrame.isValid && !titleText) {
+            clearStory(titleFrame);
+          }
+
+          if (bodyStory && bodyStory.isValid) {
+            applyStyleAndSize(bodyStory, config.styles.body.name, config.styles.body.pt_base, config.styles.body.pt_min, config.styles.body.pt_max);
+          }
+
+          if (bodyStory && bodyStory.isValid && (!titleFrame || !titleFrame.isValid) && titleText) {
+            applyStyleToFirstParagraph(bodyStory, config.styles.title.name, config.styles.title.pt_base, config.styles.title.pt_min, config.styles.title.pt_max);
+          }
+
+          var oversetResult = resolveOverset(textFrame, titleFrame, config.overset, config.styles);
+
+          if (oversetResult.overset === "overset_hard") {
+            noteWarnings.push("overset_hard");
+          }
+
+          var images = imagesMap[noteCounter] || [];
+          for (var im = 0; im < images.length; im++) {
+            var photo = images[im];
+            var frame = findLabeledItem(pages, noteId + "_foto" + photo.index);
+            if (!frame || !frame.isValid) {
+              noteWarnings.push("image_frame_missing:" + noteId + "_foto" + photo.index);
+              continue;
+            }
+            try {
+              var appliedStyle = false;
+              if (config.images.default_object_style) {
+                try {
+                  var style = app.activeDocument.objectStyles.itemByName(config.images.default_object_style);
+                  if (style && style.isValid) {
+                    frame.appliedObjectStyle = style;
+                    appliedStyle = true;
+                  }
+                } catch (_) {}
+              }
+              if (!appliedStyle && config.images.fallback_object_style) {
+                try {
+                  var fb = app.activeDocument.objectStyles.itemByName(config.images.fallback_object_style);
+                  if (fb && fb.isValid) {
+                    frame.appliedObjectStyle = fb;
+                    appliedStyle = true;
+                  }
+                } catch (_) {}
+              }
+              frame.place(photo.file);
+              frame.fit(FitOptions.PROPORTIONALLY);
+              frame.fit(FitOptions.CENTER_CONTENT);
+            } catch (e) {
+              noteWarnings.push("place_fail:" + photo.file.displayName);
+            }
+          }
+
+          var row = {
+            pagina: numbers.join("-"),
+            nota: noteId,
+            chars: bodyText.length + titleText.length,
+            body_pt: oversetResult.bodyPointSize,
+            title_pt: oversetResult.titlePointSize,
+            overset: oversetResult.overset,
+            excedente_aprox: oversetResult.exceed,
+            warnings: noteWarnings.join(";"),
+            errors: ""
+          };
+          csv.writeRow(row);
         }
 
         disposeScratch(scratch);
-      }
-
-      var remainingIndex = 0;
-      for (var pg = 0; pg < pages.length; pg++) {
-        if (remainingIndex >= notesData.length) {
-          break;
-        }
-        var page = pages[pg];
-        var slots = splitSlotsByType(slotsForPage(layoutSlots, page));
-        var textSlots = slots.text;
-        var photoSlots = slots.photo;
-        for (var ps = 0; ps < photoSlots.length; ps++) {
-          photoSlots[ps].used = false;
-        }
-
-        if (!textSlots.length) {
-          continue;
-        }
-
-        var notesForPage = [];
-        while (remainingIndex < notesData.length && notesForPage.length < textSlots.length) {
-          notesForPage.push(notesData[remainingIndex]);
-          remainingIndex++;
-        }
-
-        if (!notesForPage.length) {
-          continue;
-        }
-
-        var results = [];
-        if (config.layout_solver && config.layout_solver.enabled === false) {
-          for (var nf = 0; nf < notesForPage.length; nf++) {
-            var manualSlot = nf < textSlots.length ? textSlots[nf] : null;
-            results.push({
-              note: notesForPage[nf],
-              slot: manualSlot,
-              overset: { overset: manualSlot ? "" : "overset_hard", exceed: 0 },
-              warnings: [],
-              bodyPointSize: config.styles.body.pt_base,
-              titlePointSize: config.styles.title.pt_base,
-              columnWidth: manualSlot ? manualSlot.width : 0,
-              totalHeight: manualSlot ? (manualSlot.bounds[2] - manualSlot.bounds[0]) : 0,
-              bodyBounds: manualSlot ? cloneBounds(manualSlot.bounds) : null,
-            });
-          }
-        } else {
-          var solver = new LayoutSolver(page, textSlots, config, config.styles);
-          var solution = solver.solve(notesForPage);
-          results = solution.noteResults || [];
-        }
-
-        for (var nr = 0; nr < notesForPage.length; nr++) {
-          var note = notesForPage[nr];
-          var result = results[nr] || {
-            note: note,
-            slot: null,
-            overset: { overset: "overset_hard", exceed: note.bodyText ? note.bodyText.length : 0 },
-            warnings: ["solver_no_result"],
-            bodyPointSize: config.styles.body.pt_base,
-            titlePointSize: config.styles.title.pt_base,
-            columnWidth: 0,
-            totalHeight: 0,
-            bodyBounds: null,
-          };
-
-          var slot = result.slot;
-          var csvWidth = "";
-          var csvHeight = "";
-          var overflowChars = result.overset ? result.overset.exceed : 0;
-          var noteWarnings = (note.warnings || []).slice(0);
-          if (result.warnings && result.warnings.length) {
-            for (var w = 0; w < result.warnings.length; w++) {
-              noteWarnings.push(result.warnings[w]);
-            }
-          }
-
-          if (slot) {
-            csvWidth = formatNumber(toCm(result.columnWidth || (slot.bounds[3] - slot.bounds[1])), 2);
-            csvHeight = formatNumber(toCm(result.totalHeight || (slot.bounds[2] - slot.bounds[0])), 2);
-            removeItemsByLabel(page, note.noteId + "_texto");
-            var finalFrame = createTextFrameForBounds(page, result.bodyBounds || slot.bounds, note.noteId + "_texto");
-            if (finalFrame) {
-              var fullText = note.bodyText || "";
-              if (note.titleText) {
-                fullText = note.titleText + (fullText ? "\r" + fullText : "");
-              }
-              var story = writeStory(finalFrame, fullText);
-              if (story && story.isValid) {
-                applyStyleAndSize(story, config.styles.body.name, result.bodyPointSize, result.bodyPointSize, result.bodyPointSize);
-                if (note.titleText) {
-                  applyStyleToFirstParagraph(story, config.styles.title.name, result.titlePointSize, result.titlePointSize, result.titlePointSize);
-                }
-              }
-              var info = storyOversetInfo(story);
-              if (info.over) {
-                overflowChars = info.exceed;
-                noteWarnings.push("overset_hard");
-                markOversetFrame(finalFrame);
-              } else if (result.overset && result.overset.overset === "overset_hard") {
-                noteWarnings.push("overset_hard");
-                markOversetFrame(finalFrame);
-              } else {
-                try { finalFrame.strokeWeight = 0; } catch (_) {}
-              }
-            }
-            placeNoteImages(note, page, photoSlots, config, noteWarnings);
-          } else {
-            noteWarnings.push("slot_missing:" + note.noteId);
-          }
-
-          csv.writeRow({
-            pagina: page.name,
-            nota: note.noteId,
-            slot_usado: slot ? slot.id : "",
-            ancho_col: csvWidth,
-            alto_final: csvHeight,
-            pt_titulo: result.titlePointSize || "",
-            pt_cuerpo: result.bodyPointSize || "",
-            overflow_chars: overflowChars,
-            warnings: noteWarnings.join(";"),
-            errors: "",
-          });
-        }
-      }
-
-      while (remainingIndex < notesData.length) {
-        var leftover = notesData[remainingIndex];
-        remainingIndex++;
-        var leftoverWarnings = (leftover.warnings || []).slice(0);
-        leftoverWarnings.push("no_slot_available");
-        csv.writeRow({
-          pagina: leftover.pageLabel,
-          nota: leftover.noteId,
-          slot_usado: "",
-          ancho_col: "",
-          alto_final: "",
-          pt_titulo: "",
-          pt_cuerpo: "",
-          overflow_chars: leftover.bodyText ? leftover.bodyText.length : 0,
-          warnings: leftoverWarnings.join(";"),
-          errors: "",
-        });
       }
     }
 
@@ -1440,7 +858,6 @@
 
     alert("Proceso finalizado. Reporte en " + csvPath.fsName + ".");
   }
-
 
   run();
 })();
