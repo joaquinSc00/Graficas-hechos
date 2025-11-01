@@ -827,6 +827,107 @@
     return false;
   }
 
+  function normalizeText(value) {
+    if (!value && value !== 0) {
+      return "";
+    }
+    return String(value).toLowerCase();
+  }
+
+  function getObjectStyleName(item) {
+    if (!item || !item.isValid) {
+      return "";
+    }
+    try {
+      if (item.appliedObjectStyle && item.appliedObjectStyle.isValid && item.appliedObjectStyle.name) {
+        return String(item.appliedObjectStyle.name);
+      }
+    } catch (_) {}
+    return "";
+  }
+
+  function itemHasSlotTag(item) {
+    if (!item || !item.isValid) {
+      return false;
+    }
+    var label = "";
+    try {
+      label = normalizeText(item.label);
+    } catch (_) {}
+    if (label) {
+      if (label === "root" || label.indexOf("slot") === 0 || label.indexOf("slot_") >= 0) {
+        return true;
+      }
+    }
+    var styleName = normalizeText(getObjectStyleName(item));
+    if (styleName) {
+      if (styleName.indexOf("slot") === 0 || styleName.indexOf("slot_") >= 0) {
+        return true;
+      }
+    }
+    try {
+      if (item.associatedXMLElement && item.associatedXMLElement.markupTag && item.associatedXMLElement.markupTag.name) {
+        var tagName = normalizeText(item.associatedXMLElement.markupTag.name);
+        if (tagName === "root") {
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  function detectSlotFlags(item, bounds, photoConfig) {
+    var info = { isPhoto: false, is2ColPhotoSlot: false, fitsPhoto2ColHeight: false };
+    if (!item || !item.isValid) {
+      return info;
+    }
+    var tokens = [];
+    try {
+      if (item.name) {
+        tokens.push(String(item.name));
+      }
+    } catch (_) {}
+    try {
+      if (item.label) {
+        tokens.push(String(item.label));
+      }
+    } catch (_) {}
+    var styleName = getObjectStyleName(item);
+    if (styleName) {
+      tokens.push(styleName);
+    }
+    var combined = normalizeText(tokens.join(" "));
+    if (combined.indexOf("foto") >= 0 || combined.indexOf("photo") >= 0 || combined.indexOf("imagen") >= 0) {
+      info.isPhoto = true;
+    }
+    if (combined.indexOf("2col") >= 0 || combined.indexOf("2 col") >= 0 || combined.indexOf("2-col") >= 0 || combined.indexOf("doscol") >= 0) {
+      info.is2ColPhotoSlot = true;
+    }
+    var photoCfg = photoConfig || {};
+    var expectedWidth = photoCfg.two_col_w_cm ? pointsFromCm(photoCfg.two_col_w_cm) : pointsFromCm(DEFAULT_CONFIG.layout_solver.photo.two_col_w_cm);
+    var minHeight = photoCfg.min_h_cm ? pointsFromCm(photoCfg.min_h_cm) : pointsFromCm(DEFAULT_CONFIG.layout_solver.photo.min_h_cm);
+    if (bounds) {
+      var width = Math.abs(bounds[3] - bounds[1]);
+      var height = Math.abs(bounds[2] - bounds[0]);
+      if (!info.is2ColPhotoSlot && width && expectedWidth) {
+        if (Math.abs(width - expectedWidth) <= 6) {
+          info.is2ColPhotoSlot = true;
+        }
+      }
+      if (info.isPhoto) {
+        info.fitsPhoto2ColHeight = height >= (minHeight || 0);
+      }
+    }
+    if (!info.isPhoto && info.is2ColPhotoSlot) {
+      info.isPhoto = true;
+      if (bounds) {
+        var height2 = Math.abs(bounds[2] - bounds[0]);
+        info.fitsPhoto2ColHeight = height2 >= (minHeight || 0);
+      }
+    }
+    return info;
+  }
+
   function frameIsCandidateSlot(frame) {
     if (!frame || !frame.isValid) {
       return false;
@@ -858,12 +959,13 @@
     return true;
   }
 
-  function buildDocumentSlotMap(doc) {
+  function buildDocumentSlotMap(doc, config) {
     var map = {};
     if (!doc || !doc.isValid) {
       return map;
     }
     var pages = doc.pages;
+    var photoCfg = (config && config.layout_solver && config.layout_solver.photo) || (DEFAULT_CONFIG.layout_solver ? DEFAULT_CONFIG.layout_solver.photo : {});
     for (var i = 0; i < pages.length; i++) {
       var page = pages[i];
       if (!page || !page.isValid) {
@@ -904,6 +1006,58 @@
           frame.insertLabel("auto_slot_id", autoId);
         } catch (_) {}
         slots.push(slot);
+      }
+
+      var rectangles = page.rectangles;
+      for (var r = 0; r < rectangles.length; r++) {
+        var rect = rectangles[r];
+        if (!rect || !rect.isValid) {
+          continue;
+        }
+        if (!itemHasSlotTag(rect)) {
+          continue;
+        }
+        var rectBounds = null;
+        try {
+          rectBounds = cloneBounds(rect.geometricBounds);
+        } catch (_) {
+          rectBounds = null;
+        }
+        if (!rectBounds) {
+          continue;
+        }
+        var rectWidth = Math.abs(rectBounds[3] - rectBounds[1]);
+        var rectHeight = Math.abs(rectBounds[2] - rectBounds[0]);
+        var rectArea = rectWidth * rectHeight;
+        if (rectWidth < 60 || rectHeight < 60 || rectArea < 10000) {
+          continue;
+        }
+        if (rectBounds[0] < -1000 || rectBounds[1] < -1000) {
+          continue;
+        }
+        counter++;
+        var rectSlotId = String(page.name) + "_auto_" + counter;
+        var rectSlot = {
+          id: rectSlotId,
+          page: page.documentOffset + 1,
+          bounds: rectBounds,
+          width: rectWidth,
+          height: rectHeight,
+          columnCount: null,
+          columnGutter: null,
+          columnWidth: null,
+          isPhoto: false,
+          is2ColPhotoSlot: false,
+          fitsPhoto2ColHeight: false,
+          source: "document_rect",
+          autoId: null,
+          raw: { label: rect.label || "", objectStyle: getObjectStyleName(rect) }
+        };
+        var flags = detectSlotFlags(rect, rectBounds, photoCfg);
+        rectSlot.isPhoto = flags.isPhoto;
+        rectSlot.is2ColPhotoSlot = flags.is2ColPhotoSlot;
+        rectSlot.fitsPhoto2ColHeight = flags.fitsPhoto2ColHeight;
+        slots.push(rectSlot);
       }
       if (slots.length) {
         var nameKey = String(page.name);
@@ -2105,7 +2259,7 @@
     var config = readConfig(File(root.fsName + "/config.json"));
     var layoutSlots = readLayoutSlotsReport(File(root.fsName + "/layout_slots_report.json"));
     if (!hasAnySlots(layoutSlots)) {
-      layoutSlots = buildDocumentSlotMap(doc);
+      layoutSlots = buildDocumentSlotMap(doc, config);
     }
     var csvPath = File(root.fsName + "/reporte.csv");
     var csv = new CsvLogger(csvPath, CSV_COLUMNS);
