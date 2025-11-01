@@ -741,6 +741,154 @@
     }
   }
 
+  function findFrameByAutoSlotId(page, autoId) {
+    if (!page || !page.isValid || !autoId) {
+      return null;
+    }
+    var frames = page.textFrames;
+    for (var i = 0; i < frames.length; i++) {
+      var frame = frames[i];
+      if (!frame || !frame.isValid) {
+        continue;
+      }
+      try {
+        if (frame.extractLabel && frame.extractLabel("auto_slot_id") === autoId) {
+          return frame;
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  function instantiateTextFrameForSlot(page, slot, bounds, label) {
+    var frame = null;
+    var targetBounds = bounds || (slot && slot.bounds ? cloneBounds(slot.bounds) : null);
+    if (slot && slot.autoId) {
+      frame = findFrameByAutoSlotId(page, slot.autoId);
+      if (frame && frame.isValid) {
+        try { frame.label = label || frame.label; } catch (_) {}
+        if (targetBounds) {
+          try { frame.geometricBounds = cloneBounds(targetBounds); } catch (_) {}
+        }
+        applySlotColumnsToFrame(frame, slot);
+        clearStory(frame);
+        try { frame.insertLabel("auto_slot_id", slot.autoId); } catch (_) {}
+        return frame;
+      }
+    }
+    removeItemsByLabel(page, label);
+    frame = createTextFrameForBounds(page, targetBounds, label);
+    if (frame && slot && slot.autoId) {
+      try { frame.insertLabel("auto_slot_id", slot.autoId); } catch (_) {}
+    }
+    applySlotColumnsToFrame(frame, slot);
+    return frame;
+  }
+
+  function hasAnySlots(slotsMap) {
+    if (!slotsMap) {
+      return false;
+    }
+    for (var key in slotsMap) {
+      if (!slotsMap.hasOwnProperty(key)) {
+        continue;
+      }
+      var arr = slotsMap[key];
+      if (arr && arr.length) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function frameIsCandidateSlot(frame) {
+    if (!frame || !frame.isValid) {
+      return false;
+    }
+    if (frame.locked || !frame.visible) {
+      return false;
+    }
+    var gb = null;
+    try {
+      gb = frame.geometricBounds;
+    } catch (e) {
+      gb = null;
+    }
+    if (!gb) {
+      return false;
+    }
+    var width = Math.abs(gb[3] - gb[1]);
+    var height = Math.abs(gb[2] - gb[0]);
+    var area = width * height;
+    if (width < 60 || height < 60) {
+      return false;
+    }
+    if (area < 10000) {
+      return false;
+    }
+    if (gb[0] < -1000 || gb[1] < -1000) {
+      return false;
+    }
+    return true;
+  }
+
+  function buildDocumentSlotMap(doc) {
+    var map = {};
+    if (!doc || !doc.isValid) {
+      return map;
+    }
+    var pages = doc.pages;
+    for (var i = 0; i < pages.length; i++) {
+      var page = pages[i];
+      if (!page || !page.isValid) {
+        continue;
+      }
+      var frames = page.textFrames;
+      var slots = [];
+      var counter = 0;
+      for (var j = 0; j < frames.length; j++) {
+        var frame = frames[j];
+        if (!frameIsCandidateSlot(frame)) {
+          continue;
+        }
+        counter++;
+        var gb = cloneBounds(frame.geometricBounds);
+        var prefs = frame.textFramePreferences;
+        var slotId = String(page.name) + "_auto_" + counter;
+        var autoId = "auto_slot_" + (page.documentOffset + 1) + "_" + counter;
+        var slot = {
+          id: slotId,
+          page: page.documentOffset + 1,
+          bounds: gb,
+          width: Math.abs(gb[3] - gb[1]),
+          height: Math.abs(gb[2] - gb[0]),
+          columnCount: prefs ? prefs.textColumnCount : null,
+          columnGutter: prefs ? prefs.textColumnGutter : null,
+          columnWidth: (prefs && prefs.useFixedColumnWidth) ? prefs.textColumnFixedWidth : null,
+          isPhoto: false,
+          source: "document_frame",
+          autoId: autoId
+        };
+        if (!slot.columnWidth && prefs && prefs.textColumnCount) {
+          try {
+            slot.columnWidth = slot.width / Math.max(1, prefs.textColumnCount);
+          } catch (_) {}
+        }
+        try {
+          frame.insertLabel("auto_slot_id", autoId);
+        } catch (_) {}
+        slots.push(slot);
+      }
+      if (slots.length) {
+        var nameKey = String(page.name);
+        var indexKey = String(page.documentOffset + 1);
+        map[nameKey] = slots.slice(0);
+        map[indexKey] = slots.slice(0);
+      }
+    }
+    return map;
+  }
+
   function resolveTitleOverset(frame, cfg, stylesCfg, limits) {
     var result = {
       overset: "",
@@ -1930,6 +2078,9 @@
 
     var config = readConfig(File(root.fsName + "/config.json"));
     var layoutSlots = readLayoutSlotsReport(File(root.fsName + "/layout_slots_report.json"));
+    if (!hasAnySlots(layoutSlots)) {
+      layoutSlots = buildDocumentSlotMap(doc);
+    }
     var csvPath = File(root.fsName + "/reporte.csv");
     var csv = new CsvLogger(csvPath, CSV_COLUMNS);
     var processedPages = [];
@@ -2165,12 +2316,9 @@
           if (bodySlot) {
             csvWidth = formatNumber(toCm(result.columnWidth || (bodySlot.bounds[3] - bodySlot.bounds[1])), 2);
             csvHeight = formatNumber(toCm(result.totalHeight || (bodySlot.bounds[2] - bodySlot.bounds[0])), 2);
-            removeItemsByLabel(bodyPage, note.noteId + "_texto");
-            removeItemsByLabel(bodyPage, note.noteId + "_cuerpo");
             var bodyLabel = note.noteId + "_texto";
-            var bodyFrame = createTextFrameForBounds(bodyPage, result.bodyBounds || bodySlot.bounds, bodyLabel);
+            var bodyFrame = instantiateTextFrameForSlot(bodyPage, bodySlot, result.bodyBounds || (bodySlot ? bodySlot.bounds : null), bodyLabel);
             if (bodyFrame) {
-              applySlotColumnsToFrame(bodyFrame, bodySlot);
               var bodyStoryText = note.bodyText || "";
               if (result.combined) {
                 if (note.titleText) {
@@ -2200,10 +2348,8 @@
           }
 
           if (!result.combined && titleSlot && note.titleText) {
-            removeItemsByLabel(titlePage, note.noteId + "_titulo");
-            var titleFrame = createTextFrameForBounds(titlePage, result.titleBounds || titleSlot.bounds, note.noteId + "_titulo");
+            var titleFrame = instantiateTextFrameForSlot(titlePage, titleSlot, result.titleBounds || (titleSlot ? titleSlot.bounds : null), note.noteId + "_titulo");
             if (titleFrame) {
-              applySlotColumnsToFrame(titleFrame, titleSlot);
               var titleStory = writeStory(titleFrame, note.titleText || "");
               if (titleStory && titleStory.isValid) {
                 applyStyleAndSize(titleStory, config.styles.title.name, result.titlePointSize, result.titlePointSize, result.titlePointSize);
