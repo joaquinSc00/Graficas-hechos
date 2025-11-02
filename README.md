@@ -64,6 +64,11 @@ Automatizar el **armado preliminar** de cada edición del periódico en **InDesi
 * Detección de slots por: **label “root”** y/o **estilo de objeto** `SLOT_*` (y podemos incluir tag XML “root” como respaldo).
 * **Solver** con intentos acotados (más intentos cuanto más notas) hasta encontrar una combinación válida.
 
+### Herramientas auxiliares
+
+* `generate_slot_report.py`: procesa un `.idml` y genera un reporte JSON/CSV con todos los rectángulos/polígonos detectados.
+* `summarize_slots.py`: lee un `*_slots_report.json` y resume por página cuántos slots hay y qué superficie ocupan.
+
 ---
 
 Si esto refleja exactamente tu idea, paso el encargo a Codex con estas reglas (y mantengo que ya **no necesitamos** `layout_slots_report.json`: leemos **directo** del documento). Si querés, añado “bonus” para que el solver intente **dividir un slot grande** en sub-bloques si detecta que la foto no entra abajo/arriba en ninguna combinación.
