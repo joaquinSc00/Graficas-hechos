@@ -41,16 +41,62 @@
     return Math.round(value * 1000) / 1000;
   }
 
+  function getItemType(item) {
+    try {
+      if (item && item.reflect && item.reflect.name) {
+        return String(item.reflect.name);
+      }
+    } catch (e) {}
+    return "";
+  }
+
+  function allowedSlotType(typeName) {
+    if (!typeName) {
+      return false;
+    }
+    var lower = typeName.toLowerCase();
+    return lower === "rectangle" || lower === "textframe" || lower === "polygon";
+  }
+
+  function safeBounds(item) {
+    try {
+      var gb = item.geometricBounds;
+      if (gb && gb.length === 4) {
+        return [gb[0], gb[1], gb[2], gb[3]];
+      }
+    } catch (e) {}
+    return null;
+  }
+
   function collectFromPage(page) {
     var pageSlots = [];
-    var rectangles = page.rectangles;
-    for (var i = 0; i < rectangles.length; i++) {
-      var rect = rectangles[i];
-      if (!isSlot(rect)) {
+    var items = [];
+    try {
+      items = page.allPageItems ? page.allPageItems : [];
+    } catch (e) {
+      items = [];
+    }
+
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      if (!item || !item.isValid) {
         continue;
       }
 
-      var bounds = rect.geometricBounds;
+      var typeName = getItemType(item);
+      if (!allowedSlotType(typeName)) {
+        continue;
+      }
+
+      if (!isSlot(item)) {
+        continue;
+      }
+
+      var bounds = safeBounds(item);
+      if (!bounds) {
+        continue;
+      }
+
       var y1 = bounds[0];
       var x1 = bounds[1];
       var y2 = bounds[2];
@@ -58,9 +104,10 @@
 
       pageSlots.push({
         page: page.name,
-        id: rect.id,
-        label: rect.label || "",
-        objectStyle: rect.appliedObjectStyle ? rect.appliedObjectStyle.name : "",
+        id: item.id,
+        label: item.label || "",
+        objectStyle: item.appliedObjectStyle ? item.appliedObjectStyle.name : "",
+        type: typeName,
         x_pt: asNumber(x1),
         y_pt: asNumber(y1),
         w_pt: asNumber(x2 - x1),
