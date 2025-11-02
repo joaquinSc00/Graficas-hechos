@@ -957,6 +957,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     config = load_config(args.config)
 
     slots: List[Slot] = []
+
+    if not args.slots_json and not args.idml:
+        try:
+            user_input = input(
+                "Ingresá la ruta del archivo de slots (JSON) o del documento IDML: "
+            ).strip()
+        except EOFError:
+            user_input = ""
+
+        user_input = os.path.expanduser(user_input.strip('"').strip("'"))
+
+        if user_input.lower().endswith(".json"):
+            args.slots_json = user_input
+        elif user_input:
+            args.idml = user_input
+
     if args.slots_json:
         slots = load_slots_from_json(args.slots_json)
     elif args.idml:
