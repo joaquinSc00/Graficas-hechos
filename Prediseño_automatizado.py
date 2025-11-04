@@ -628,7 +628,7 @@ class CapacityModel:
 class Config:
     """Parámetros capturados desde la consola."""
 
-    idml_path: Path
+    layout_path: Path
     pages: List[int]
     cierre_root: Path
     output_dir: Path
@@ -662,6 +662,7 @@ class PageGeometry:
     gutter_mm: float
     column_width_mm: float
     margins_mm: Dict[str, float]
+    slots_mm: Tuple[Tuple[float, float, float, float], ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -924,7 +925,7 @@ def prompt_inputs() -> Config:
         cleaned = raw.strip().strip('"\'')
         return Path(cleaned).expanduser().resolve()
 
-    idml_raw = input("Ruta del IDML: ")
+    layout_raw = input("Ruta del layout_slots.json: ")
     pages_raw = input(
         f"Páginas a procesar (ENTER para {default_pages}): "
     ).strip()
@@ -952,7 +953,7 @@ def prompt_inputs() -> Config:
             config_path = None
 
     cfg = Config(
-        idml_path=_clean_path(idml_raw),
+        layout_path=_clean_path(layout_raw),
         pages=pages,
         cierre_root=_clean_path(cierre_raw),
         output_dir=_clean_path(output_raw),
@@ -972,12 +973,9 @@ def prompt_inputs() -> Config:
 def run_pipeline(cfg: Config) -> None:
     """Ejecuta el flujo completo definido en el diseño."""
 
-    logging.info("Iniciando pipeline con IDML %s", cfg.idml_path)
+    logging.info("Iniciando pipeline con layout %s", cfg.layout_path)
 
-    document_info, pages, items = parse_idml_document(cfg.idml_path)
-    usable_by_page = extract_usable_rect_by_page(pages, items, cfg.slot_selector)
-    grid_by_page = extract_grid_by_page(pages)
-    page_geometries = merge_page_geometry(pages, usable_by_page, grid_by_page)
+    page_geometries = load_page_geometry_from_layout_json(cfg.layout_path, cfg.slot_selector)
 
     target_pages = filter_target_pages(page_geometries, cfg.pages)
 
@@ -1066,6 +1064,7 @@ def run_pipeline(cfg: Config) -> None:
                 page_geom.name,
                 len(dropped_titles),
                 "; ".join(dropped_titles),
+            )
         if notes:
             note_variants = generate_variants_for_notes(notes, capacity_model)
             variants_by_page[page_geom.name] = note_variants
@@ -1091,6 +1090,141 @@ def run_pipeline(cfg: Config) -> None:
     save_plan_blocks_json(blocks, cfg.output_dir)
     save_plan_blocks_csv(blocks, cfg.output_dir)
     log_global_summary(stats)
+
+# ---------------------------------------------------------------------------
+# 1) Layout JSON → geometrías
+#
+
+def load_page_geometry_from_layout_json(
+    layout_path: Path, slot_selector: Optional[Mapping[str, str]] = None
+) -> List[PageGeometry]:
+    """Carga geometrías a partir del ``layout_slots.json`` generado por JSX."""
+
+    if not layout_path.exists():
+        raise FileNotFoundError(layout_path)
+
+    with layout_path.open(encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    pages_raw = data.get("pages", [])
+
+    expected_label: Optional[str] = None
+    if slot_selector and isinstance(slot_selector, Mapping):
+        raw_label = slot_selector.get("label")
+        if isinstance(raw_label, str) and raw_label.strip():
+            expected_label = raw_label.strip()
+
+    if not expected_label:
+        expected_label = "ESPACIO_NOTAS"
+
+    def _value_mm(entry: Mapping[str, Any], prefix: str) -> Optional[float]:
+        key_mm = f"{prefix}_mm"
+        key_pt = f"{prefix}_pt"
+        raw_mm = entry.get(key_mm) if isinstance(entry, Mapping) else None
+        if raw_mm not in (None, ""):
+            try:
+                return float(raw_mm)
+            except (TypeError, ValueError):
+                pass
+        raw_pt = entry.get(key_pt) if isinstance(entry, Mapping) else None
+        if raw_pt not in (None, ""):
+            try:
+                return float(raw_pt) * POINT_TO_MM
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _round_mm(value: float) -> float:
+        return round(value, 1)
+
+    geometries: List[PageGeometry] = []
+
+    for page_entry in pages_raw:
+        try:
+            page_number = int(page_entry.get("page_index") or page_entry.get("page_number") or 0)
+        except (TypeError, ValueError):
+            page_number = 0
+        page_name = str(page_entry.get("page_name", page_number or "")) or str(page_number)
+
+        columns_info = page_entry.get("columns") if isinstance(page_entry, Mapping) else {}
+        try:
+            columns = int(columns_info.get("count")) if columns_info else 0
+        except (TypeError, ValueError):
+            columns = 0
+        gutter_mm = 0.0
+        if isinstance(columns_info, Mapping):
+            try:
+                gutter_mm = float(columns_info.get("gutter_mm") or 0.0)
+            except (TypeError, ValueError):
+                gutter_mm = 0.0
+        column_width_mm = 0.0
+        if isinstance(columns_info, Mapping):
+            try:
+                column_width_mm = float(columns_info.get("col_width_mm") or 0.0)
+            except (TypeError, ValueError):
+                column_width_mm = 0.0
+
+        slots_raw = page_entry.get("slots") if isinstance(page_entry, Mapping) else []
+        slot_rects: List[Tuple[float, float, float, float]] = []
+        for slot in slots_raw or []:
+            if not isinstance(slot, Mapping):
+                continue
+            label = str(slot.get("label", "")).strip()
+            if expected_label and label != expected_label:
+                continue
+            left = _value_mm(slot, "left")
+            top = _value_mm(slot, "top")
+            width = _value_mm(slot, "width")
+            height = _value_mm(slot, "height")
+            if None in {left, top, width, height}:
+                continue
+            slot_rects.append(tuple(_round_mm(v) for v in (left, top, width, height)))
+
+        if slot_rects:
+            primary_slot = max(slot_rects, key=lambda rect: rect[2] * rect[3])
+        else:
+            primary_slot = (0.0, 0.0, 0.0, 0.0)
+            logging.warning("Página %s: no se encontraron slots '%s'", page_name, expected_label)
+
+        if columns > 0 and column_width_mm <= 0.0 and primary_slot[2] > 0.0:
+            inner_width = max(primary_slot[2] - gutter_mm * max(columns - 1, 0), 0.0)
+            column_width_mm = inner_width / columns if columns else 0.0
+
+        margins_entry = page_entry.get("margins") if isinstance(page_entry, Mapping) else {}
+        margins: Dict[str, float] = {}
+        for key in ("left", "top", "right", "bottom"):
+            mm_value = _value_mm(margins_entry or {}, key)
+            if mm_value is not None:
+                margins[key] = _round_mm(mm_value)
+
+        page_size_entry = page_entry.get("page_size") if isinstance(page_entry, Mapping) else {}
+        page_width_mm = _value_mm(page_size_entry or {}, "width") or 0.0
+        page_height_mm = _value_mm(page_size_entry or {}, "height") or 0.0
+
+        if "left" not in margins:
+            margins["left"] = _round_mm(primary_slot[0])
+        if "top" not in margins:
+            margins["top"] = _round_mm(primary_slot[1])
+        if "right" not in margins and page_width_mm > 0.0:
+            margins["right"] = _round_mm(max(page_width_mm - (primary_slot[0] + primary_slot[2]), 0.0))
+        if "bottom" not in margins and page_height_mm > 0.0:
+            margins["bottom"] = _round_mm(max(page_height_mm - (primary_slot[1] + primary_slot[3]), 0.0))
+
+        geometries.append(
+            PageGeometry(
+                page_number=page_number,
+                name=page_name,
+                usable_rect_mm=primary_slot,
+                columns=columns,
+                gutter_mm=_round_mm(gutter_mm) if gutter_mm else 0.0,
+                column_width_mm=_round_mm(column_width_mm) if column_width_mm else column_width_mm,
+                margins_mm=margins,
+                slots_mm=tuple(slot_rects),
+            )
+        )
+
+    geometries.sort(key=lambda geom: geom.page_number)
+    return geometries
 
 
 # ---------------------------------------------------------------------------
