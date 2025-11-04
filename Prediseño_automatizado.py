@@ -27,6 +27,8 @@ import json
 import logging
 import sys
 
+from solver import PlanSettings, solve_page_layout, summarize_outcome
+
 try:  # pragma: no cover - dependencia opcional en tiempo de ejecución
     from docx import Document  # type: ignore
 except Exception:  # pragma: no cover - la librería puede no estar instalada
@@ -673,6 +675,13 @@ class Block:
     y_mm: float
     w_mm: float
     h_mm: float
+    note_id: Optional[str] = None
+    title_height_mm: float = 0.0
+    body_height_mm: float = 0.0
+    image_height_mm: float = 0.0
+    img_mode: str = "none"
+    body_chars_fit: int = 0
+    body_chars_overflow: int = 0
 
 
 @dataclass
@@ -809,28 +818,79 @@ def run_pipeline(cfg: Config) -> None:
 
     blocks: List[Block] = []
     stats = PipelineStats()
+    plan_settings = PlanSettings()
+
+    page_map = scan_closure_folder(cfg.cierre_root)
 
     for page_geom in target_pages:
         issues = validate_page_geometry(page_geom)
         if issues:
             stats.warnings.extend(issues)
 
-        page_blocks = build_onecol_blocks(page_geom)
-        blocks.extend(page_blocks)
-
-        stats.pages_processed += 1
-        stats.total_blocks += len(page_blocks)
-
         column_height = page_geom.usable_rect_mm[3]
         base_capacity = capacity_model.capacity_per_column(column_height)
         capacity_summary[page_geom.page_number] = {"span1": base_capacity}
 
-    page_map = scan_closure_folder(cfg.cierre_root)
-
-    for page_geom in target_pages:
         notes = extract_notes_for_page(page_map.get(page_geom.name))
         write_out_txt(page_geom.name, notes, cfg.output_dir)
         stats.notes_processed += len(notes)
+
+        outcome = solve_page_layout(page_geom, notes, capacity_model, plan_settings)
+
+        left_mm, top_mm, _, _ = page_geom.usable_rect_mm
+        column_step = page_geom.column_width_mm + page_geom.gutter_mm
+        page_blocks: List[Block] = []
+        for assignment in outcome.assignments:
+            x_mm = left_mm + assignment.column_index * column_step
+            y_mm = top_mm + assignment.start_mm
+            note_identifier = f"{page_geom.name}#{getattr(assignment.note, 'note_id', '?')}"
+            page_blocks.append(
+                Block(
+                    page=page_geom.page_number,
+                    column_index=assignment.column_index + 1,
+                    span=1,
+                    x_mm=x_mm,
+                    y_mm=y_mm,
+                    w_mm=page_geom.column_width_mm,
+                    h_mm=assignment.used_height_mm,
+                    note_id=note_identifier,
+                    title_height_mm=assignment.title_height_mm,
+                    body_height_mm=assignment.body_height_mm,
+                    image_height_mm=assignment.image_height_mm,
+                    img_mode=assignment.img_mode,
+                    body_chars_fit=assignment.body_chars_fit,
+                    body_chars_overflow=assignment.body_chars_overflow,
+                )
+            )
+
+        blocks.extend(page_blocks)
+        stats.pages_processed += 1
+        stats.total_blocks += len(page_blocks)
+
+        log_page_summary(page_geom.name, len(page_blocks), issues)
+        logging.info("Página %s · solver: %s", page_geom.name, summarize_outcome(outcome))
+        overflow_blocks = [block for block in page_blocks if block.body_chars_overflow > 0]
+        if overflow_blocks:
+            total_overflow = sum(block.body_chars_overflow for block in overflow_blocks)
+            logging.info(
+                "Página %s: overflow total=%s chars en %s bloques",
+                page_geom.name,
+                total_overflow,
+                len(overflow_blocks),
+            )
+        for entry in outcome.logs:
+            logging.debug("Página %s · %s", page_geom.name, entry)
+        if outcome.dropped_notes:
+            dropped_titles = [
+                getattr(note, "title", f"Nota {getattr(note, 'note_id', '?')}") or f"Nota {getattr(note, 'note_id', '?')}"
+                for note in outcome.dropped_notes
+            ]
+            logging.warning(
+                "Página %s: %s notas sin ubicar (%s)",
+                page_geom.name,
+                len(dropped_titles),
+                "; ".join(dropped_titles),
+            )
 
     logging.debug("Resumen de capacidad por página: %s", capacity_summary)
 
@@ -1251,7 +1311,24 @@ def save_plan_blocks_csv(blocks: Sequence[Block], out_dir: Path) -> None:
     csv_path = out_dir / "plan_bloques.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh, delimiter=";")
-        writer.writerow(["page", "i", "span", "x_mm", "y_mm", "w_mm", "h_mm"])
+        writer.writerow(
+            [
+                "page",
+                "i",
+                "span",
+                "x_mm",
+                "y_mm",
+                "w_mm",
+                "h_mm",
+                "note_id",
+                "title_height_mm",
+                "body_height_mm",
+                "image_height_mm",
+                "img_mode",
+                "body_chars_fit",
+                "body_chars_overflow",
+            ]
+        )
         for block in blocks:
             writer.writerow(
                 [
@@ -1262,6 +1339,13 @@ def save_plan_blocks_csv(blocks: Sequence[Block], out_dir: Path) -> None:
                     f"{block.y_mm:.2f}",
                     f"{block.w_mm:.2f}",
                     f"{block.h_mm:.2f}",
+                    block.note_id or "",
+                    f"{block.title_height_mm:.2f}",
+                    f"{block.body_height_mm:.2f}",
+                    f"{block.image_height_mm:.2f}",
+                    block.img_mode,
+                    block.body_chars_fit,
+                    block.body_chars_overflow,
                 ]
             )
 
