@@ -689,6 +689,181 @@ class Note:
 
 
 @dataclass
+class ColumnFootprint:
+    """Huella de columnas estimada para una variante de nota."""
+
+    span: int
+    column_heights_mm: Tuple[float, ...]
+    penalties: Dict[str, float]
+    image_priority: int
+    image_preset: Optional[str] = None
+
+
+@dataclass
+class NoteVariant:
+    """Descripción de una configuración posible para una nota."""
+
+    note_id: int
+    title_span: int
+    span: int
+    image_preset: Optional[str]
+    total_height_mm: float
+    text_height_mm: float
+    footprint: ColumnFootprint
+
+    def preference_key(self) -> Tuple[int, int, float]:
+        """Genera la llave de ordenamiento por preferencia."""
+
+        return (
+            self.title_span,
+            _image_order_index(self.image_preset),
+            self.total_height_mm,
+        )
+
+
+def _image_order_index(image: Optional[str]) -> int:
+    """Define el orden de preferencia para las imágenes."""
+
+    if image is None:
+        return 2
+    if image.lower() == "vertical":
+        return 1
+    return 0
+
+
+def _image_priority(image: Optional[str]) -> int:
+    """Asigna prioridad a la preservación de la imagen."""
+
+    if image is None:
+        return 0
+    if image.lower() == "vertical":
+        return 1
+    return 2
+
+
+def estimate_text_height_mm(note: Note, model: CapacityModel, span: int) -> float:
+    """Calcula la altura necesaria para alojar el cuerpo de la nota."""
+
+    span = max(span, 1)
+    chars_per_column = model.text_style.chars_per_line * span
+    if chars_per_column <= 0:
+        return 0.0
+    estimated_lines = note.chars_body / float(chars_per_column)
+    return estimated_lines / model.text_style.lines_per_mm if model.text_style.lines_per_mm else 0.0
+
+
+def generate_note_variants(
+    note: Note,
+    model: CapacityModel,
+    title_spans: Sequence[int] = (1, 2),
+    title_level: int = 1,
+) -> List[NoteVariant]:
+    """Calcula variantes ordenadas por preferencia para la nota dada."""
+
+    available_presets = {
+        name: preset for name, preset in model.image_presets.items()
+    }
+    image_options: List[Optional[str]] = [None]
+
+    if "vertical" in available_presets:
+        image_options.append("vertical")
+    if "horizontal" in available_presets:
+        image_options.append("horizontal")
+    else:
+        for name, preset in available_presets.items():
+            if preset.span >= 2:
+                image_options.append(name)
+                break
+
+    variants: List[NoteVariant] = []
+
+    for title_span in title_spans:
+        if title_span <= 0:
+            continue
+        title_height_total = model.title_cost(title_level, span=title_span)
+        title_height_per_column = title_height_total / float(title_span)
+
+        for image_name in image_options:
+            preset = available_presets.get(image_name) if image_name else None
+            image_span = preset.span if preset else 0
+            span = max(title_span, image_span, 1)
+
+            text_height = estimate_text_height_mm(note, model, span)
+
+            image_height_total = model.image_cost(image_name, span) if image_name else 0.0
+            image_height_per_column = image_height_total / float(image_span) if image_span else 0.0
+
+            column_heights: List[float] = []
+            for col in range(span):
+                col_height = text_height
+                if col < title_span:
+                    col_height += title_height_per_column
+                if image_span and col < image_span:
+                    col_height += image_height_per_column
+                column_heights.append(col_height)
+
+            total_height = max(column_heights) if column_heights else 0.0
+            available_chars = model.capacity_per_column(
+                total_height,
+                span=span,
+                title_level=title_level,
+                image_preset=image_name,
+            )
+            overflow = max(note.chars_body - available_chars, 0)
+            slack = max(available_chars - note.chars_body, 0)
+
+            penalties: Dict[str, float] = {}
+            if overflow:
+                penalties["overflow_chars"] = float(overflow)
+            if slack:
+                penalties["unused_capacity"] = float(slack)
+            if image_name is None:
+                penalties.setdefault("missing_image", 1.0)
+
+            footprint = ColumnFootprint(
+                span=span,
+                column_heights_mm=tuple(column_heights),
+                penalties=penalties,
+                image_priority=_image_priority(image_name),
+                image_preset=image_name,
+            )
+
+            variants.append(
+                NoteVariant(
+                    note_id=note.note_id,
+                    title_span=title_span,
+                    span=span,
+                    image_preset=image_name,
+                    total_height_mm=total_height,
+                    text_height_mm=text_height,
+                    footprint=footprint,
+                )
+            )
+
+    variants.sort(key=lambda variant: variant.preference_key())
+    return variants
+
+
+def generate_variants_for_notes(
+    notes: Sequence[Note],
+    model: CapacityModel,
+    title_spans: Sequence[int] = (1, 2),
+    title_level: int = 1,
+) -> Dict[int, List[NoteVariant]]:
+    """Calcula variantes para todas las notas en la colección."""
+
+    variants: Dict[int, List[NoteVariant]] = {}
+    for note in notes:
+        variants[note.note_id] = generate_note_variants(
+            note,
+            model,
+            title_spans=title_spans,
+            title_level=title_level,
+        )
+    return variants
+
+
+@dataclass
 class PipelineStats:
     """Estadísticas básicas para el log final."""
 
@@ -809,6 +984,7 @@ def run_pipeline(cfg: Config) -> None:
 
     blocks: List[Block] = []
     stats = PipelineStats()
+    variants_by_page: Dict[str, Dict[int, List[NoteVariant]]] = {}
 
     for page_geom in target_pages:
         issues = validate_page_geometry(page_geom)
@@ -831,6 +1007,26 @@ def run_pipeline(cfg: Config) -> None:
         notes = extract_notes_for_page(page_map.get(page_geom.name))
         write_out_txt(page_geom.name, notes, cfg.output_dir)
         stats.notes_processed += len(notes)
+
+        if notes:
+            note_variants = generate_variants_for_notes(notes, capacity_model)
+            variants_by_page[page_geom.name] = note_variants
+            logging.debug(
+                "Variantes generadas para %s: %s",
+                page_geom.name,
+                {
+                    note_id: [
+                        {
+                            "title_span": variant.title_span,
+                            "span": variant.span,
+                            "image": variant.image_preset,
+                            "height_mm": round(variant.total_height_mm, 2),
+                        }
+                        for variant in variants
+                    ]
+                    for note_id, variants in note_variants.items()
+                },
+            )
 
     logging.debug("Resumen de capacidad por página: %s", capacity_summary)
 
