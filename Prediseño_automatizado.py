@@ -700,8 +700,19 @@ def extract_usable_rect_by_page(pages, items, selector: Dict[str, str]):
     for page_id, rects in candidates.items():
         if not rects:
             continue
-        rects.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
-        usable[page_id] = rects[0][2]
+
+        # Intentamos descartar candidatos que evidentemente no pertenecen al área
+        # útil de la página.  En particular, ignoramos los que comienzan con
+        # coordenadas negativas, ya que suelen corresponder a fondos o elementos
+        # sangrados que desbordan el pliego.
+        filtered_rects = [
+            entry for entry in rects if entry[2][0] >= 0.0 and entry[2][1] >= 0.0
+        ]
+
+        rects_to_consider = filtered_rects if filtered_rects else rects
+
+        rects_to_consider.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        usable[page_id] = rects_to_consider[0][2]
 
     return usable
 
@@ -713,6 +724,11 @@ def extract_grid_by_page(pages):
     for page in pages:
         width_mm = page.bounds.width * POINT_TO_MM
         columns = 5 if width_mm >= 250.0 else 4
+
+        # La página 3 reserva una columna para staff, por lo que solo quedan
+        # cuatro columnas útiles para notas.
+        if page.index == 3 or page.name.strip() == "3":
+            columns = 4
         gutter_mm = 4.0
         grid[page.page_id] = {
             "columns": float(columns),
