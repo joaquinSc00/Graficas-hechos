@@ -126,12 +126,26 @@ def prompt_inputs() -> Config:
 
     default_pages = "2,3,5,6,7,8,9,10,11,12,13,14,15,16,17,18"
 
-    idml_path = input("Ruta del IDML: ").strip()
+    def _clean_path(raw: str) -> Path:
+        """Normaliza rutas ingresadas manualmente.
+
+        Es habitual que, al copiar y pegar desde el explorador de
+        archivos, Windows incluya comillas dobles alrededor de la ruta.
+        Esto provoca que ``Path`` busque un archivo con comillas
+        literales en su nombre.  Para evitar el fallo se eliminan las
+        comillas de apertura y cierre (simples o dobles) antes de
+        convertir a :class:`Path`.
+        """
+
+        cleaned = raw.strip().strip('"\'')
+        return Path(cleaned).expanduser().resolve()
+
+    idml_raw = input("Ruta del IDML: ")
     pages_raw = input(
         f"Páginas a procesar (ENTER para {default_pages}): "
     ).strip()
-    cierre_root = input("Carpeta del cierre: ").strip()
-    output_dir = input("Carpeta de salida: ").strip()
+    cierre_raw = input("Carpeta del cierre: ")
+    output_raw = input("Carpeta de salida: ")
 
     if not pages_raw:
         pages_raw = default_pages
@@ -139,10 +153,10 @@ def prompt_inputs() -> Config:
     pages = [int(p.strip()) for p in pages_raw.split(",") if p.strip()]
 
     cfg = Config(
-        idml_path=Path(idml_path).expanduser().resolve(),
+        idml_path=_clean_path(idml_raw),
         pages=pages,
-        cierre_root=Path(cierre_root).expanduser().resolve(),
-        output_dir=Path(output_dir).expanduser().resolve(),
+        cierre_root=_clean_path(cierre_raw),
+        output_dir=_clean_path(output_raw),
         slot_selector={"layer": "ESPACIO_NOTAS"},
     )
 
