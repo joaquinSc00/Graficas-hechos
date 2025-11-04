@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import csv
 import json
@@ -443,6 +443,186 @@ except Exception:  # pragma: no cover - import defensivo
 
 
 @dataclass
+class TextStyle:
+    """Modelo tipográfico básico.
+
+    El estilo captura la cantidad promedio de caracteres por línea, la densidad de
+    líneas por milímetro y el costo vertical de los títulos por nivel.  Estos
+    parámetros se utilizan para estimar capacidades y reservar espacio en los
+    cálculos de variantes.
+    """
+
+    chars_per_line: int
+    lines_per_mm: float
+    title_heights_mm: Dict[int, float]
+
+    def capacity_for_height(self, height_mm: float) -> int:
+        """Calcula la capacidad de texto disponible para una altura dada."""
+
+        effective_height = max(height_mm, 0.0)
+        lines = effective_height * self.lines_per_mm
+        return int(lines * self.chars_per_line)
+
+    def title_cost(self, level: Optional[int], span: int = 1) -> float:
+        """Devuelve la altura en mm reservada por un título."""
+
+        if level is None:
+            return 0.0
+        base = self.title_heights_mm.get(level)
+        if base is None:
+            return 0.0
+        return base * max(span, 1)
+
+    @classmethod
+    def defaults(cls) -> "TextStyle":
+        """Genera un set de parámetros tipográficos por defecto."""
+
+        return cls(chars_per_line=32, lines_per_mm=0.38, title_heights_mm={1: 16.0, 2: 12.0, 3: 8.0})
+
+    @classmethod
+    def from_config(cls, data: Mapping[str, Any]) -> "TextStyle":
+        """Construye la instancia a partir de un diccionario de configuración."""
+
+        if not data:
+            return cls.defaults()
+
+        defaults = cls.defaults()
+        chars = int(
+            data.get(
+                "chars_per_line",
+                data.get("chars_por_linea", data.get("caracteres_por_linea", defaults.chars_per_line)),
+            )
+        )
+        lines_per_mm = float(
+            data.get(
+                "lines_per_mm",
+                data.get("lineas_por_mm", data.get("líneas_por_mm", defaults.lines_per_mm)),
+            )
+        )
+
+        raw_heights = data.get("title_heights_mm") or data.get("alturas_titulos_mm") or {}
+        title_heights: Dict[int, float] = {}
+        if isinstance(raw_heights, Mapping):
+            for key, value in raw_heights.items():
+                try:
+                    level = int(key)
+                    title_heights[level] = float(value)
+                except (TypeError, ValueError):
+                    continue
+
+        if not title_heights:
+            title_heights = dict(defaults.title_heights_mm)
+
+        return cls(chars_per_line=chars, lines_per_mm=lines_per_mm, title_heights_mm=title_heights)
+
+
+@dataclass
+class ImagePreset:
+    """Preset de imagen parametrizable por span."""
+
+    name: str
+    span: int
+    height_mm: float
+
+    def cost(self, span: Optional[int] = None) -> float:
+        """Calcula el costo vertical en función del span solicitado."""
+
+        if span is None or span == self.span:
+            return self.height_mm
+
+        base_span = max(self.span, 1)
+        requested_span = max(span, 1)
+        return self.height_mm * requested_span / base_span
+
+    @classmethod
+    def default_presets(cls) -> Dict[str, "ImagePreset"]:
+        """Presets usados habitualmente en el flujo."""
+
+        return {
+            "horizontal": cls(name="horizontal", span=2, height_mm=43.0),
+            "vertical": cls(name="vertical", span=1, height_mm=60.0),
+        }
+
+    @classmethod
+    def from_config(cls, name: str, data: Mapping[str, Any]) -> "ImagePreset":
+        """Construye un preset a partir de un diccionario de configuración."""
+
+        defaults = cls.default_presets().get(name)
+        span = int(data.get("span", data.get("columnas", defaults.span if defaults else 1)))
+
+        if "height_mm" in data:
+            height_mm = float(data["height_mm"])
+        elif "height_cm" in data:
+            height_mm = float(data["height_cm"]) * 10.0
+        elif "alto_cm" in data:
+            height_mm = float(data["alto_cm"]) * 10.0
+        else:
+            height_mm = defaults.height_mm if defaults else 0.0
+
+        return cls(name=name, span=span, height_mm=height_mm)
+
+    @classmethod
+    def dict_from_config(cls, data: Mapping[str, Any]) -> Dict[str, "ImagePreset"]:
+        """Genera un diccionario de presets a partir de una configuración genérica."""
+
+        presets = {}
+        if not isinstance(data, Mapping):
+            return cls.default_presets()
+
+        for name, raw in data.items():
+            if not isinstance(raw, Mapping):
+                continue
+            presets[name] = cls.from_config(name, raw)
+
+        if not presets:
+            presets = cls.default_presets()
+
+        return presets
+
+
+@dataclass
+class CapacityModel:
+    """Modelo que encapsula los cálculos de capacidad y costos adicionales."""
+
+    text_style: TextStyle
+    image_presets: Dict[str, ImagePreset]
+
+    def capacity_per_column(
+        self,
+        column_height_mm: float,
+        span: int = 1,
+        title_level: Optional[int] = None,
+        image_preset: Optional[str] = None,
+    ) -> int:
+        """Calcula la capacidad disponible por columna considerando reservas."""
+
+        reserved_height = self.text_style.title_cost(title_level, span)
+
+        if image_preset:
+            try:
+                reserved_height += self.image_cost(image_preset, span)
+            except KeyError:
+                logging.warning("Preset de imagen '%s' no encontrado", image_preset)
+
+        available_height = max(column_height_mm - reserved_height, 0.0)
+        per_column = self.text_style.capacity_for_height(available_height)
+        return per_column * max(span, 1)
+
+    def title_cost(self, level: Optional[int], span: int = 1) -> float:
+        """Interfaz directa para obtener el costo de título."""
+
+        return self.text_style.title_cost(level, span)
+
+    def image_cost(self, name: str, span: Optional[int] = None) -> float:
+        """Devuelve el costo vertical del preset solicitado."""
+
+        preset = self.image_presets.get(name)
+        if preset is None:
+            raise KeyError(name)
+        return preset.cost(span if span is not None else preset.span)
+
+
+@dataclass
 class Config:
     """Parámetros capturados desde la consola."""
 
@@ -451,6 +631,14 @@ class Config:
     cierre_root: Path
     output_dir: Path
     slot_selector: Dict[str, str] = field(default_factory=dict)
+    typography: TextStyle = field(default_factory=TextStyle.defaults)
+    image_presets: Dict[str, ImagePreset] = field(default_factory=ImagePreset.default_presets)
+    config_path: Optional[Path] = None
+
+    def build_capacity_model(self) -> CapacityModel:
+        """Crea una instancia de :class:`CapacityModel` con los parámetros vigentes."""
+
+        return CapacityModel(text_style=self.typography, image_presets=dict(self.image_presets))
 
 
 @dataclass
@@ -514,6 +702,21 @@ class PipelineStats:
 # Entrada por consola
 
 
+def load_capacity_settings_from_file(path: Path) -> Tuple[TextStyle, Dict[str, ImagePreset]]:
+    """Carga parámetros tipográficos e imágenes desde un archivo JSON."""
+
+    raw_text = path.read_text(encoding="utf-8")
+    payload = json.loads(raw_text)
+
+    typography_data = payload.get("typography") or payload.get("tipografia") or {}
+    image_data = payload.get("image_presets") or payload.get("imagenes") or payload.get("imágenes") or {}
+
+    typography = TextStyle.from_config(typography_data)
+    image_presets = ImagePreset.dict_from_config(image_data)
+
+    return typography, image_presets
+
+
 def prompt_inputs() -> Config:
     """Solicita los parámetros básicos para ejecutar el pipeline.
 
@@ -543,11 +746,26 @@ def prompt_inputs() -> Config:
     ).strip()
     cierre_raw = input("Carpeta del cierre: ")
     output_raw = input("Carpeta de salida: ")
+    config_file_raw = input(
+        "Archivo de configuración tipográfica (ENTER para defaults): "
+    ).strip()
 
     if not pages_raw:
         pages_raw = default_pages
 
     pages = [int(p.strip()) for p in pages_raw.split(",") if p.strip()]
+
+    config_path = _clean_path(config_file_raw) if config_file_raw else None
+
+    typography = TextStyle.defaults()
+    image_presets = ImagePreset.default_presets()
+
+    if config_path:
+        try:
+            typography, image_presets = load_capacity_settings_from_file(config_path)
+        except Exception as exc:  # pragma: no cover - errores de IO/formato
+            logging.warning("No se pudo cargar la configuración %s: %s", config_path, exc)
+            config_path = None
 
     cfg = Config(
         idml_path=_clean_path(idml_raw),
@@ -555,6 +773,9 @@ def prompt_inputs() -> Config:
         cierre_root=_clean_path(cierre_raw),
         output_dir=_clean_path(output_raw),
         slot_selector={"layer": "ESPACIO_NOTAS"},
+        typography=typography,
+        image_presets=image_presets,
+        config_path=config_path,
     )
 
     return cfg
@@ -576,6 +797,16 @@ def run_pipeline(cfg: Config) -> None:
 
     target_pages = filter_target_pages(page_geometries, cfg.pages)
 
+    capacity_model = cfg.build_capacity_model()
+    logging.debug(
+        "Modelo de capacidad inicializado — chars/linea=%s líneas/mm=%s presets=%s",
+        capacity_model.text_style.chars_per_line,
+        capacity_model.text_style.lines_per_mm,
+        list(capacity_model.image_presets.keys()),
+    )
+
+    capacity_summary: Dict[int, Dict[str, int]] = {}
+
     blocks: List[Block] = []
     stats = PipelineStats()
 
@@ -590,12 +821,18 @@ def run_pipeline(cfg: Config) -> None:
         stats.pages_processed += 1
         stats.total_blocks += len(page_blocks)
 
+        column_height = page_geom.usable_rect_mm[3]
+        base_capacity = capacity_model.capacity_per_column(column_height)
+        capacity_summary[page_geom.page_number] = {"span1": base_capacity}
+
     page_map = scan_closure_folder(cfg.cierre_root)
 
     for page_geom in target_pages:
         notes = extract_notes_for_page(page_map.get(page_geom.name))
         write_out_txt(page_geom.name, notes, cfg.output_dir)
         stats.notes_processed += len(notes)
+
+    logging.debug("Resumen de capacidad por página: %s", capacity_summary)
 
     save_plan_blocks_json(blocks, cfg.output_dir)
     save_plan_blocks_csv(blocks, cfg.output_dir)
