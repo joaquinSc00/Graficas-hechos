@@ -114,6 +114,10 @@
     return tf;
   }
 
+  function trimString(value) {
+    return String(value == null ? "" : value).replace(/^[\s\uFEFF\xA0]+|[\s\uFEFF\xA0]+$/g, "");
+  }
+
   function composeNoteText(titleTxt, bodyTxt) {
     if (typeof titleTxt !== "string") {
       titleTxt = titleTxt != null ? String(titleTxt) : "";
@@ -127,7 +131,9 @@
     if (!bodyTxt || bodyTxt.replace(/\s+/g, "") === "") {
       bodyTxt = "[SIN CUERPO]";
     }
-    return titleTxt.replace(/\r?\n/g, " ").trim() + "\r" + bodyTxt;
+    var formattedTitle = trimString(titleTxt.replace(/\r?\n/g, " "));
+    var formattedBody = trimString(bodyTxt);
+    return formattedTitle + "\r" + formattedBody;
   }
 
   function tryStyle(tf) {
