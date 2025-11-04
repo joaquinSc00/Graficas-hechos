@@ -115,6 +115,12 @@
   }
 
   function composeNoteText(titleTxt, bodyTxt) {
+    if (typeof titleTxt !== "string") {
+      titleTxt = titleTxt != null ? String(titleTxt) : "";
+    }
+    if (typeof bodyTxt !== "string") {
+      bodyTxt = bodyTxt != null ? String(bodyTxt) : "";
+    }
     if (!titleTxt || titleTxt.replace(/\s+/g, "") === "") {
       titleTxt = "[SIN TÍTULO]";
     }
