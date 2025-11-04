@@ -27,6 +27,19 @@ import json
 import logging
 import sys
 
+try:  # pragma: no cover - dependencia opcional en tiempo de ejecución
+    from docx import Document  # type: ignore
+except Exception:  # pragma: no cover - la librería puede no estar instalada
+    Document = None  # type: ignore
+
+try:
+    from generate_slot_report import POINT_TO_MM, analyze_document as analyze_idml_document
+except Exception as exc:  # pragma: no cover - import defensivo
+    raise RuntimeError(
+        "No se pudo importar generate_slot_report. Asegúrate de ejecutar este script "
+        "desde la raíz del repositorio para disponer de la lógica de IDML."
+    ) from exc
+
 
 # ---------------------------------------------------------------------------
 # Modelos de datos
@@ -192,25 +205,156 @@ def parse_idml_document(idml_path: Path):
     items (rectángulos, polígonos, textframes) encontrados.
     """
 
-    raise NotImplementedError("parse_idml_document debe integrarse con IDML")
+    logging.debug("Analizando documento IDML %s", idml_path)
+
+    document_info_raw, pages, items = analyze_idml_document(str(idml_path))
+
+    if pages:
+        first_bounds = pages[0].bounds
+        page_size_mm = (
+            first_bounds.width * POINT_TO_MM,
+            first_bounds.height * POINT_TO_MM,
+        )
+    else:
+        page_size_mm = (0.0, 0.0)
+
+    doc_info = DocumentInfo(page_size_mm=page_size_mm, bleed_mm=(0.0, 0.0, 0.0, 0.0))
+
+    logging.info(
+        "Documento '%s' — páginas: %s — spreads: %s",
+        document_info_raw.get("name"),
+        document_info_raw.get("pages"),
+        document_info_raw.get("spreads"),
+    )
+
+    return doc_info, pages, items
 
 
 def extract_usable_rect_by_page(pages, items, selector: Dict[str, str]):
     """Selecciona el rectángulo utilizable por página."""
 
-    raise NotImplementedError("extract_usable_rect_by_page necesita implementación")
+    selector_normalized = {
+        key: (value.strip().lower() if isinstance(value, str) else value)
+        for key, value in selector.items()
+        if value is not None
+    }
+
+    candidates: Dict[str, List[Tuple[bool, float, Tuple[float, float, float, float]]]] = {}
+
+    for item in items:
+        if item.page_id is None:
+            continue
+
+        if item.item_type not in {"Rectangle", "Polygon", "TextFrame"}:
+            continue
+
+        match = True
+        for key, expected in selector_normalized.items():
+            actual = getattr(item, key, None)
+            if actual is None:
+                actual = item.as_dict().get(key)  # type: ignore[arg-type]
+            if isinstance(expected, str):
+                actual_str = str(actual or "").strip().lower()
+                if actual_str != expected:
+                    match = False
+                    break
+            else:
+                if actual != expected:
+                    match = False
+                    break
+
+        bounds = item.bounds_page or item.bounds_spread
+        if not bounds:
+            continue
+
+        rect = (
+            bounds.left * POINT_TO_MM,
+            bounds.top * POINT_TO_MM,
+            bounds.width * POINT_TO_MM,
+            bounds.height * POINT_TO_MM,
+        )
+        area = rect[2] * rect[3]
+
+        match_flag = bool(selector_normalized == {} or match)
+        hard_match = bool(match and selector_normalized)
+
+        if not match_flag and selector_normalized:
+            # Guardamos como candidato de fallback si no encontramos coincidencias estrictas.
+            candidates.setdefault(item.page_id, []).append((False, area, rect))
+            continue
+
+        candidates.setdefault(item.page_id, []).append((hard_match or not selector_normalized, area, rect))
+
+    usable: Dict[str, Tuple[float, float, float, float]] = {}
+    for page_id, rects in candidates.items():
+        if not rects:
+            continue
+        rects.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        usable[page_id] = rects[0][2]
+
+    return usable
 
 
 def extract_grid_by_page(pages):
     """Determina la retícula de columnas por página."""
 
-    raise NotImplementedError("extract_grid_by_page debe devolver PageGeometry")
+    grid: Dict[str, Dict[str, float]] = {}
+    for page in pages:
+        width_mm = page.bounds.width * POINT_TO_MM
+        columns = 5 if width_mm >= 250.0 else 4
+        gutter_mm = 4.0
+        grid[page.page_id] = {
+            "columns": float(columns),
+            "gutter_mm": gutter_mm,
+        }
+    return grid
 
 
 def merge_page_geometry(pages, usable_rects, grids) -> List[PageGeometry]:
     """Combina la información de rectángulos y retícula en objetos completos."""
 
-    raise NotImplementedError("merge_page_geometry debe crear PageGeometry por página")
+    geometries: List[PageGeometry] = []
+
+    for page in pages:
+        usable = usable_rects.get(page.page_id)
+        if usable is None:
+            usable = (0.0, 0.0, 0.0, 0.0)
+
+        left_mm, top_mm, width_mm, height_mm = usable
+
+        page_width_mm = page.bounds.width * POINT_TO_MM
+        page_height_mm = page.bounds.height * POINT_TO_MM
+
+        margins = {
+            "left": max(left_mm, 0.0),
+            "top": max(top_mm, 0.0),
+            "right": max(page_width_mm - (left_mm + width_mm), 0.0),
+            "bottom": max(page_height_mm - (top_mm + height_mm), 0.0),
+        }
+
+        grid_info = grids.get(page.page_id, {})
+        columns = int(grid_info.get("columns", 5))
+        gutter_mm = float(grid_info.get("gutter_mm", 4.0))
+
+        if columns > 0:
+            inner_width = max(width_mm - gutter_mm * (columns - 1), 0.0)
+            column_width_mm = inner_width / columns if columns else 0.0
+        else:
+            column_width_mm = 0.0
+
+        geometries.append(
+            PageGeometry(
+                page_number=page.index,
+                name=page.name,
+                usable_rect_mm=(left_mm, top_mm, width_mm, height_mm),
+                columns=columns,
+                gutter_mm=gutter_mm,
+                column_width_mm=column_width_mm,
+                margins_mm=margins,
+            )
+        )
+
+    return geometries
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +398,29 @@ def validate_page_geometry(page_geom: PageGeometry) -> List[str]:
 def build_onecol_blocks(page_geom: PageGeometry) -> List[Block]:
     """Genera bloques de span=1 dentro del rectángulo utilizable."""
 
-    raise NotImplementedError("build_onecol_blocks debe proyectar columnas en el rectángulo")
+    blocks: List[Block] = []
+
+    left_mm, top_mm, width_mm, height_mm = page_geom.usable_rect_mm
+    if width_mm <= 0 or height_mm <= 0 or page_geom.columns <= 0:
+        return blocks
+
+    column_width = page_geom.column_width_mm
+    gutter = page_geom.gutter_mm
+
+    for idx in range(page_geom.columns):
+        x_mm = left_mm + idx * (column_width + gutter)
+        block = Block(
+            page=page_geom.page_number,
+            column_index=idx + 1,
+            span=1,
+            x_mm=x_mm,
+            y_mm=top_mm,
+            w_mm=column_width,
+            h_mm=height_mm,
+        )
+        blocks.append(block)
+
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +433,26 @@ def scan_closure_folder(root: Path) -> Dict[str, Path]:
     if root is None:
         raise ValueError("scan_closure_folder requiere una ruta raíz válida")
 
-    raise NotImplementedError("scan_closure_folder debe mapear Página NN -> carpeta")
+    mapping: Dict[str, Path] = {}
+
+    if not root.exists():
+        logging.warning("La carpeta de cierre %s no existe", root)
+        return mapping
+
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        name = entry.name.strip()
+        if not name:
+            continue
+        mapping.setdefault(name, entry)
+
+        digits = "".join(ch for ch in name if ch.isdigit())
+        if digits:
+            mapping.setdefault(digits, entry)
+            mapping.setdefault(f"Página {int(digits)}", entry)
+
+    return mapping
 
 
 def extract_notes_for_page(page_dir: Optional[Path]) -> List[Note]:
@@ -277,7 +462,78 @@ def extract_notes_for_page(page_dir: Optional[Path]) -> List[Note]:
         logging.warning("No se encontró carpeta de cierre para la página")
         return []
 
-    raise NotImplementedError("extract_notes_for_page debe parsear DOCX en notas")
+    notes: List[Note] = []
+
+    if not page_dir.exists():
+        logging.warning("La carpeta %s no existe", page_dir)
+        return notes
+
+    docx_files = sorted(page_dir.glob("*.docx"))
+    txt_files = sorted(page_dir.glob("*.txt")) if not docx_files else []
+
+    counter = 1
+
+    if docx_files and Document is None:
+        logging.warning("python-docx no está disponible; se omiten los DOCX en %s", page_dir)
+        docx_files = []
+
+    for path in docx_files:
+        try:
+            document = Document(path)
+        except Exception as exc:  # pragma: no cover - lectura de terceros
+            logging.warning("No se pudo abrir %s: %s", path, exc)
+            continue
+
+        paragraphs = [para.text.strip() for para in document.paragraphs if para.text.strip()]
+        if not paragraphs:
+            continue
+
+        title = paragraphs[0]
+        body = "\n".join(paragraphs[1:]) if len(paragraphs) > 1 else ""
+        body_words = body.split()
+        title_words = title.split()
+
+        notes.append(
+            Note(
+                note_id=counter,
+                title=title,
+                body=body,
+                chars_title=len(title),
+                chars_body=len(body),
+                words=len(title_words) + len(body_words),
+                source=path,
+            )
+        )
+        counter += 1
+
+    if not notes:
+        for path in txt_files:
+            try:
+                content = path.read_text(encoding="utf-8").strip()
+            except Exception as exc:  # pragma: no cover - lectura IO
+                logging.warning("No se pudo leer %s: %s", path, exc)
+                continue
+            if not content:
+                continue
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            if not lines:
+                continue
+            title = lines[0]
+            body = "\n".join(lines[1:]) if len(lines) > 1 else ""
+            notes.append(
+                Note(
+                    note_id=counter,
+                    title=title,
+                    body=body,
+                    chars_title=len(title),
+                    chars_body=len(body),
+                    words=len((title + " " + body).split()),
+                    source=path,
+                )
+            )
+            counter += 1
+
+    return notes
 
 
 def write_out_txt(page_name: str, notes: Sequence[Note], out_dir: Path) -> None:
