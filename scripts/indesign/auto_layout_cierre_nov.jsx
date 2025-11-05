@@ -38,12 +38,51 @@ function trimStr(s) {
 // ---------- Utilidades ----------
 var MM2PT = 2.834645669; // 1 mm = 2.8346 pt
 
-function askFile(promptTxt, filter) {
+function getRepoRoot() {
+  try {
+    var scriptFile = File($.fileName);
+    var indesignFolder = scriptFile.parent;
+    if (!indesignFolder) return null;
+    var scriptsFolder = indesignFolder.parent;
+    if (!scriptsFolder) return null;
+    return scriptsFolder.parent || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function getDefaultDataPaths() {
+  var repoRoot = getRepoRoot();
+  if (!repoRoot) {
+    return { plan: null, outTxt: null };
+  }
+  var dataRoot = new Folder(repoRoot.fsName + "/data");
+  return {
+    plan: new File(dataRoot.fsName + "/reports/plan_bloques.json"),
+    outTxt: new Folder(dataRoot.fsName + "/out_txt"),
+  };
+}
+
+function askFile(promptTxt, filter, defaultPath) {
+  if (defaultPath) {
+    var defFile = defaultPath instanceof File ? defaultPath : File(defaultPath);
+    if (defFile.exists) {
+      $.writeln("Usando plan por defecto: " + defFile.fsName);
+      return defFile;
+    }
+  }
   var f = File.openDialog(promptTxt, filter || "*.*");
   if (!f) throw new Error("Operación cancelada.");
   return f;
 }
-function askFolder(promptTxt) {
+function askFolder(promptTxt, defaultPath) {
+  if (defaultPath) {
+    var defFolder = defaultPath instanceof Folder ? defaultPath : Folder(defaultPath);
+    if (defFolder.exists) {
+      $.writeln("Usando TXT por defecto: " + defFolder.fsName);
+      return defFolder;
+    }
+  }
   var f = Folder.selectDialog(promptTxt);
   if (!f) throw new Error("Operación cancelada.");
   return f;
@@ -194,8 +233,14 @@ function placeBlock(doc, layer, page, blk, noteTxts) {
   }
   var doc = app.activeDocument;
 
+  var defaults = getDefaultDataPaths();
+
   // Seleccionar plan_bloques.json
-  var planFile = askFile("Seleccioná plan_bloques.json (array plano de bloques)", "*.json");
+  var planFile = askFile(
+    "Seleccioná plan_bloques.json (array plano de bloques)",
+    "*.json",
+    defaults.plan
+  );
   var planRaw = readTextFile(planFile);
   var plan;
   try {
@@ -210,7 +255,10 @@ function placeBlock(doc, layer, page, blk, noteTxts) {
   }
 
   // Seleccionar carpeta out_txt
-  var outRoot = askFolder("Seleccioná la carpeta raíz de out_txt (contiene subcarpetas 2,3,5,...)");
+  var outRoot = askFolder(
+    "Seleccioná la carpeta raíz de out_txt (contiene subcarpetas 2,3,5,...)",
+    defaults.outTxt
+  );
 
   // Agrupar por página
   var byPage = {};

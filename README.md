@@ -15,6 +15,11 @@ Automatizar el **armado preliminar** de cada edición del periódico en **InDesi
 ├── src/
 │   ├── Prediseño_automatizado.py
 │   └── solver.py
+├── data/
+│   ├── layouts/
+│   ├── idml/
+│   ├── reports/
+│   └── out_txt/
 └── scripts/
     └── indesign/
         └── auto_layout_cierre_nov.jsx
@@ -25,6 +30,29 @@ Automatizar el **armado preliminar** de cada edición del periódico en **InDesi
   Ejecutalo como módulo (`python -m src.Prediseño_automatizado`) para garantizar que los imports relativos funcionen.
 * `src/solver.py` aloja el beam-search responsable de evaluar combinaciones de notas dentro de cada página.
 * `scripts/indesign/auto_layout_cierre_nov.jsx` es el ExtendScript que se ejecuta dentro de InDesign para volcar el resultado.
+* `data/` funciona como staging area común para el cierre: los subdirectorios están versionados con placeholders para que la estructura
+  sobreviva en Git pero el contenido real (IDML, reportes, TXT) siga ignorado.
+
+#### Qué guardar en cada subcarpeta de `data/`
+
+* `data/layouts/`: aquí vive el `layout_slots.json` (o variantes) que describe la retícula exportada desde InDesign.
+* `data/idml/`: depositá los IDML originales que alimentan el parsing automático.
+* `data/reports/`: el pipeline escribe aquí `plan_bloques.json`, `plan_bloques.csv` y los logs generados por `run_pipeline`.
+* `data/out_txt/`: almacena los TXT listos para importar desde InDesign (`<página>/<NN>_title.txt`, `<NN>_body.txt` + `meta.json`).
+
+Todos los directorios reales permanecen ignorados salvo por sus `.gitkeep`, de modo que los datos del cierre no se versionen.
+
+#### Cómo se encadenan los pasos
+
+1. Ubicá los IDML y la retícula generada en `data/idml/` y `data/layouts/layout_slots.json`.
+2. Colocá el material del cierre (DOCX, imágenes) en `data/cierre/` u otra carpeta y, al ejecutar `python -m src.Prediseño_automatizado`, aceptá los defaults (creá `data/cierre/` si aún no existe; está ignorada por Git):
+   * `layout_slots.json` → `data/layouts/layout_slots.json`.
+   * Carpeta del cierre → `data/cierre/` (podés pegar otra ruta si preferís).
+   * Reportes → `data/reports/`.
+   * TXT → `data/out_txt/`.
+3. El comando genera los bloques (`plan_bloques.json`/`.csv`) en `data/reports/` y vuelca los textos paginados bajo `data/out_txt/`.
+4. En InDesign abrí la maqueta, corré `scripts/indesign/auto_layout_cierre_nov.jsx`: si existen los defaults, el script abrirá automáticamente
+   `data/reports/plan_bloques.json` y `data/out_txt/`; de lo contrario pedirá que navegues hacia esos elementos.
 
 Todos los scripts prototipo y archivos de prueba aislados se eliminaron para dejar solo los componentes necesarios del flujo actual.
 
