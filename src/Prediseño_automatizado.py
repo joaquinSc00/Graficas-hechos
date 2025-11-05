@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import csv
 import json
 import logging
+import math
 import sys
 
 if __package__:
@@ -671,7 +672,7 @@ class PageGeometry:
 
 @dataclass
 class Block:
-    """Bloque de 1 columna generado a partir de la retícula."""
+    """Bloque generado a partir de la retícula."""
 
     page: int
     column_index: int
@@ -687,6 +688,14 @@ class Block:
     img_mode: str = "none"
     body_chars_fit: int = 0
     body_chars_overflow: int = 0
+    column_heights_mm: Tuple[float, ...] = field(default_factory=tuple)
+    column_title_heights_mm: Tuple[float, ...] = field(default_factory=tuple)
+    column_body_heights_mm: Tuple[float, ...] = field(default_factory=tuple)
+    column_image_heights_mm: Tuple[float, ...] = field(default_factory=tuple)
+    title_lines: float = 0.0
+    body_lines: float = 0.0
+    image_span: int = 0
+    image_rect_mm: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass
@@ -708,6 +717,9 @@ class ColumnFootprint:
 
     span: int
     column_heights_mm: Tuple[float, ...]
+    column_body_heights_mm: Tuple[float, ...]
+    column_title_heights_mm: Tuple[float, ...]
+    column_image_heights_mm: Tuple[float, ...]
     penalties: Dict[str, float]
     image_priority: int
     image_preset: Optional[str] = None
@@ -723,12 +735,21 @@ class NoteVariant:
     image_preset: Optional[str]
     total_height_mm: float
     text_height_mm: float
+    title_height_mm: float
+    body_height_mm: float
+    image_height_mm: float
+    body_chars_fit: int
+    body_chars_overflow: int
+    title_lines: float
+    body_lines: float
+    image_span: int
     footprint: ColumnFootprint
 
-    def preference_key(self) -> Tuple[int, int, float]:
+    def preference_key(self) -> Tuple[int, int, int, float]:
         """Genera la llave de ordenamiento por preferencia."""
 
         return (
+            self.span,
             self.title_span,
             _image_order_index(self.image_preset),
             self.total_height_mm,
@@ -770,89 +791,158 @@ def generate_note_variants(
     note: Note,
     model: CapacityModel,
     title_spans: Sequence[int] = (1, 2),
-    title_level: int = 1,
+    title_level: Optional[int] = 1,
+    max_span: Optional[int] = None,
 ) -> List[NoteVariant]:
     """Calcula variantes ordenadas por preferencia para la nota dada."""
 
-    available_presets = {
-        name: preset for name, preset in model.image_presets.items()
-    }
-    image_options: List[Optional[str]] = [None]
+    chars_per_line = max(model.text_style.chars_per_line, 1)
+    lines_per_mm = model.text_style.lines_per_mm if model.text_style.lines_per_mm > 0 else 1.0
 
-    if "vertical" in available_presets:
-        image_options.append("vertical")
-    if "horizontal" in available_presets:
-        image_options.append("horizontal")
-    else:
-        for name, preset in available_presets.items():
-            if preset.span >= 2:
-                image_options.append(name)
-                break
+    body_chars = getattr(note, "chars_body", 0) or 0
+    title_chars = getattr(note, "chars_title", 0) or 0
+
+    available_presets = {name: preset for name, preset in model.image_presets.items()}
+
+    if max_span is None or max_span <= 0:
+        max_span = 1
+    max_span = min(max_span, 5)
+    span_candidates = list(range(1, max_span + 1))
 
     variants: List[NoteVariant] = []
 
-    for title_span in title_spans:
-        if title_span <= 0:
-            continue
-        title_height_total = model.title_cost(title_level, span=title_span)
-        title_height_per_column = title_height_total / float(title_span)
+    for span in span_candidates:
+        span_title_candidates = sorted({ts for ts in title_spans if 0 < ts <= span})
+        if not span_title_candidates:
+            span_title_candidates = [min(span, 1)]
 
-        for image_name in image_options:
-            preset = available_presets.get(image_name) if image_name else None
-            image_span = preset.span if preset else 0
-            span = max(title_span, image_span, 1)
+        image_options: List[Optional[str]] = [None]
+        for name, preset in available_presets.items():
+            if preset.span <= span:
+                image_options.append(name)
 
-            text_height = estimate_text_height_mm(note, model, span)
+        for title_span in span_title_candidates:
+            title_lines_exact = (
+                title_chars / float(chars_per_line * max(title_span, 1))
+                if title_chars > 0
+                else 0.0
+            )
+            title_lines_required = int(math.ceil(title_lines_exact)) if title_lines_exact > 0 else 0
+            base_title_height = model.title_cost(title_level, span=title_span) if title_level else 0.0
+            title_height_from_lines = (
+                title_lines_required / lines_per_mm if title_lines_required > 0 else 0.0
+            )
+            title_height_total = max(base_title_height, title_height_from_lines)
+            title_height_per_column = (
+                title_height_total / float(title_span) if title_span > 0 else 0.0
+            )
 
-            image_height_total = model.image_cost(image_name, span) if image_name else 0.0
-            image_height_per_column = image_height_total / float(image_span) if image_span else 0.0
+            title_lines_per_column: List[float] = []
 
-            column_heights: List[float] = []
             for col in range(span):
-                col_height = text_height
                 if col < title_span:
-                    col_height += title_height_per_column
-                if image_span and col < image_span:
-                    col_height += image_height_per_column
-                column_heights.append(col_height)
+                    title_lines_per_column.append(title_height_per_column * lines_per_mm)
+                else:
+                    title_lines_per_column.append(0.0)
 
-            total_height = max(column_heights) if column_heights else 0.0
-            available_chars = model.capacity_per_column(
-                total_height,
-                span=span,
-                title_level=title_level,
-                image_preset=image_name,
-            )
-            overflow = max(note.chars_body - available_chars, 0)
-            slack = max(available_chars - note.chars_body, 0)
-
-            penalties: Dict[str, float] = {}
-            if overflow:
-                penalties["overflow_chars"] = float(overflow)
-            if slack:
-                penalties["unused_capacity"] = float(slack)
-            if image_name is None:
-                penalties.setdefault("missing_image", 1.0)
-
-            footprint = ColumnFootprint(
-                span=span,
-                column_heights_mm=tuple(column_heights),
-                penalties=penalties,
-                image_priority=_image_priority(image_name),
-                image_preset=image_name,
-            )
-
-            variants.append(
-                NoteVariant(
-                    note_id=note.note_id,
-                    title_span=title_span,
-                    span=span,
-                    image_preset=image_name,
-                    total_height_mm=total_height,
-                    text_height_mm=text_height,
-                    footprint=footprint,
+            for image_name in image_options:
+                preset = available_presets.get(image_name) if image_name else None
+                image_span = preset.span if preset else 0
+                image_height_total = (
+                    preset.cost(image_span) if preset and image_span > 0 else 0.0
                 )
-            )
+                image_height_per_column = (
+                    image_height_total / float(image_span) if image_span > 0 else 0.0
+                )
+
+                body_lines_exact = (
+                    body_chars / float(chars_per_line * span) if body_chars > 0 else 0.0
+                )
+                body_lines_per_column = (
+                    int(math.ceil(body_lines_exact)) if body_lines_exact > 0 else 0
+                )
+                body_height_per_column = (
+                    body_lines_per_column / lines_per_mm if body_lines_per_column > 0 else 0.0
+                )
+
+                column_heights: List[float] = []
+                column_body_heights: List[float] = []
+                column_title_heights: List[float] = []
+                column_image_heights: List[float] = []
+
+                for col in range(span):
+                    title_height = title_height_per_column if col < title_span else 0.0
+                    image_height = image_height_per_column if image_span and col < image_span else 0.0
+                    body_height = body_height_per_column if body_lines_per_column > 0 else 0.0
+                    column_title_heights.append(title_height)
+                    column_image_heights.append(image_height)
+                    column_body_heights.append(body_height)
+                    column_heights.append(title_height + image_height + body_height)
+
+                total_height = max(column_heights) if column_heights else 0.0
+
+                body_chars_capacity = sum(
+                    model.text_style.capacity_for_height(body_height)
+                    for body_height in column_body_heights
+                )
+                body_chars_fit = min(body_chars_capacity, body_chars)
+                body_chars_overflow = max(body_chars - body_chars_capacity, 0)
+                unused_capacity = max(body_chars_capacity - body_chars, 0)
+
+                penalties: Dict[str, float] = {}
+                if body_chars_overflow:
+                    penalties["overflow_chars"] = float(body_chars_overflow)
+                if unused_capacity:
+                    penalties["unused_capacity"] = float(unused_capacity)
+                if image_name is None:
+                    penalties.setdefault("missing_image", 1.0)
+
+                title_mordida = sum(
+                    abs(lines - round(lines)) for lines in title_lines_per_column if lines > 0.0
+                )
+                if title_mordida > 0.0:
+                    penalties["title_mordida_lines"] = float(title_mordida)
+
+                body_lines_total = (
+                    body_lines_per_column * span if body_lines_per_column > 0 else 0.0
+                )
+                body_lines_exact_total = (
+                    body_chars / float(chars_per_line) if body_chars > 0 else 0.0
+                )
+                body_mordida = max(body_lines_total - body_lines_exact_total, 0.0)
+                if body_mordida > 0.0:
+                    penalties["body_mordida_lines"] = float(body_mordida)
+
+                footprint = ColumnFootprint(
+                    span=span,
+                    column_heights_mm=tuple(column_heights),
+                    column_body_heights_mm=tuple(column_body_heights),
+                    column_title_heights_mm=tuple(column_title_heights),
+                    column_image_heights_mm=tuple(column_image_heights),
+                    penalties=penalties,
+                    image_priority=_image_priority(image_name),
+                    image_preset=image_name,
+                )
+
+                variants.append(
+                    NoteVariant(
+                        note_id=note.note_id,
+                        title_span=title_span,
+                        span=span,
+                        image_preset=image_name,
+                        total_height_mm=total_height,
+                        text_height_mm=body_height_per_column,
+                        title_height_mm=title_height_total,
+                        body_height_mm=body_height_per_column,
+                        image_height_mm=image_height_total,
+                        body_chars_fit=body_chars_fit,
+                        body_chars_overflow=body_chars_overflow,
+                        title_lines=sum(title_lines_per_column),
+                        body_lines=body_lines_total,
+                        image_span=image_span,
+                        footprint=footprint,
+                    )
+                )
 
     variants.sort(key=lambda variant: variant.preference_key())
     return variants
@@ -862,18 +952,40 @@ def generate_variants_for_notes(
     notes: Sequence[Note],
     model: CapacityModel,
     title_spans: Sequence[int] = (1, 2),
-    title_level: int = 1,
+    default_title_level: Optional[int] = 1,
+    max_span: Optional[int] = None,
+    plan_settings: Optional[PlanSettings] = None,
 ) -> Dict[int, List[NoteVariant]]:
     """Calcula variantes para todas las notas en la colección."""
 
     variants: Dict[int, List[NoteVariant]] = {}
+
+    if plan_settings is not None:
+        default_title_level = plan_settings.default_title_level
+        title_level_attr = plan_settings.title_level_attr
+    else:
+        title_level_attr = "title_level"
+
     for note in notes:
+        if plan_settings is not None:
+            raw_level = getattr(note, title_level_attr, None)
+            try:
+                note_title_level = int(raw_level) if raw_level is not None else default_title_level
+            except (TypeError, ValueError):
+                note_title_level = default_title_level
+            if note_title_level is not None and note_title_level <= 0:
+                note_title_level = default_title_level
+        else:
+            note_title_level = default_title_level
+
         variants[note.note_id] = generate_note_variants(
             note,
             model,
             title_spans=title_spans,
-            title_level=title_level,
+            title_level=note_title_level,
+            max_span=max_span,
         )
+
     return variants
 
 
@@ -1045,7 +1157,22 @@ def run_pipeline(cfg: Config) -> None:
         write_out_txt(page_geom.name, notes, cfg.out_txt_dir)
         stats.notes_processed += len(notes)
 
-        outcome = solve_page_layout(page_geom, notes, capacity_model, plan_settings)
+        note_variants = generate_variants_for_notes(
+            notes,
+            capacity_model,
+            title_spans=tuple(range(1, min(page_geom.columns, 5) + 1)) if page_geom.columns else (1,),
+            default_title_level=plan_settings.default_title_level,
+            max_span=page_geom.columns,
+            plan_settings=plan_settings,
+        )
+
+        outcome = solve_page_layout(
+            page_geom,
+            notes,
+            capacity_model,
+            plan_settings,
+            variants_by_note=note_variants,
+        )
 
         left_mm, top_mm, _, _ = page_geom.usable_rect_mm
         column_step = page_geom.column_width_mm + page_geom.gutter_mm
@@ -1054,14 +1181,38 @@ def run_pipeline(cfg: Config) -> None:
             x_mm = left_mm + assignment.column_index * column_step
             y_mm = top_mm + assignment.start_mm
             note_identifier = f"{page_geom.name}#{getattr(assignment.note, 'note_id', '?')}"
+            block_width = (
+                page_geom.column_width_mm * assignment.span
+                + page_geom.gutter_mm * max(assignment.span - 1, 0)
+            )
+
+            image_rect: Optional[Tuple[float, float, float, float]] = None
+            if (
+                assignment.image_span > 0
+                and assignment.image_height_mm > 0
+                and assignment.column_image_heights_mm
+            ):
+                image_width = (
+                    page_geom.column_width_mm * assignment.image_span
+                    + page_geom.gutter_mm * max(assignment.image_span - 1, 0)
+                )
+                title_offsets = assignment.column_title_heights_mm[: assignment.image_span]
+                title_offset = max(title_offsets) if title_offsets else 0.0
+                image_rect = (
+                    x_mm,
+                    y_mm + title_offset,
+                    image_width,
+                    assignment.image_height_mm,
+                )
+
             page_blocks.append(
                 Block(
                     page=page_geom.page_number,
                     column_index=assignment.column_index + 1,
-                    span=1,
+                    span=assignment.span,
                     x_mm=x_mm,
                     y_mm=y_mm,
-                    w_mm=page_geom.column_width_mm,
+                    w_mm=block_width,
                     h_mm=assignment.used_height_mm,
                     note_id=note_identifier,
                     title_height_mm=assignment.title_height_mm,
@@ -1070,6 +1221,14 @@ def run_pipeline(cfg: Config) -> None:
                     img_mode=assignment.img_mode,
                     body_chars_fit=assignment.body_chars_fit,
                     body_chars_overflow=assignment.body_chars_overflow,
+                    column_heights_mm=assignment.column_heights_mm,
+                    column_title_heights_mm=assignment.column_title_heights_mm,
+                    column_body_heights_mm=assignment.column_body_heights_mm,
+                    column_image_heights_mm=assignment.column_image_heights_mm,
+                    title_lines=assignment.title_lines,
+                    body_lines=assignment.body_lines,
+                    image_span=assignment.image_span,
+                    image_rect_mm=image_rect,
                 )
             )
 
@@ -1102,7 +1261,6 @@ def run_pipeline(cfg: Config) -> None:
                 "; ".join(dropped_titles),
             )
         if notes:
-            note_variants = generate_variants_for_notes(notes, capacity_model)
             variants_by_page[page_geom.name] = note_variants
             logging.debug(
                 "Variantes generadas para %s: %s",
@@ -1692,6 +1850,14 @@ def save_plan_blocks_csv(blocks: Sequence[Block], out_dir: Path) -> None:
                 "img_mode",
                 "body_chars_fit",
                 "body_chars_overflow",
+                "column_heights_mm",
+                "column_title_heights_mm",
+                "column_body_heights_mm",
+                "column_image_heights_mm",
+                "title_lines",
+                "body_lines",
+                "image_span",
+                "image_rect_mm",
             ]
         )
         for block in blocks:
@@ -1711,6 +1877,14 @@ def save_plan_blocks_csv(blocks: Sequence[Block], out_dir: Path) -> None:
                     block.img_mode,
                     block.body_chars_fit,
                     block.body_chars_overflow,
+                    json.dumps(list(block.column_heights_mm)),
+                    json.dumps(list(block.column_title_heights_mm)),
+                    json.dumps(list(block.column_body_heights_mm)),
+                    json.dumps(list(block.column_image_heights_mm)),
+                    f"{block.title_lines:.2f}",
+                    f"{block.body_lines:.2f}",
+                    block.image_span,
+                    json.dumps(block.image_rect_mm) if block.image_rect_mm else "",
                 ]
             )
 
