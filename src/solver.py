@@ -19,11 +19,11 @@ class PlanSettings:
 
     beam_width: int = 8
     fit_bonus: float = 8.0
-    gap_penalty_per_mm: float = 0.18
+    gap_penalty_per_mm: float = 0.18  # penaliza el desbalance de huecos entre columnas
     overflow_penalty_per_char: float = 0.12
     overfill_penalty_per_mm: float = 0.65
     drop_penalty: float = 10.0
-    final_gap_penalty_per_mm: float = 0.25
+    final_gap_penalty_per_mm: float = 0.25  # castiga el hueco total restante en la página
     default_title_level: Optional[int] = 1
     default_image_preset: Optional[str] = None
     title_level_attr: str = "title_level"
@@ -228,7 +228,9 @@ def _evaluate_placement(
         overflow_mm = max(ideal_height - available_mm, 0.0)
         score_delta -= settings.overfill_penalty_per_mm * overflow_mm
 
-    score_delta -= settings.gap_penalty_per_mm * remaining_mm
+    # El balance de huecos se resuelve en la fase final del beam search, por lo que
+    # evitamos castigar aquí el hueco absoluto remanente.  La penalización global
+    # permite comparar configuraciones completas en lugar de decisiones aisladas.
 
     assignment = Assignment(
         note=note,
@@ -323,7 +325,14 @@ def solve_page_layout(
     best_score = float("-inf")
     for state in beam:
         gaps = tuple(max(column_height - used, 0.0) for used in state.columns_used_mm)
-        penalty = settings.final_gap_penalty_per_mm * sum(gaps)
+        total_gap = sum(gaps)
+        penalty = settings.final_gap_penalty_per_mm * total_gap
+        if gaps and settings.gap_penalty_per_mm > 0.0:
+            max_gap = max(gaps)
+            min_gap = min(gaps)
+            imbalance = max_gap - min_gap
+            if imbalance > 0.0:
+                penalty += settings.gap_penalty_per_mm * imbalance
         final_score = state.score - penalty
         if final_score > best_score:
             best_score = final_score
