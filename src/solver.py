@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - solo para type checkers
-    from Prediseño_automatizado import CapacityModel, Note, PageGeometry
+    from .Prediseño_automatizado import CapacityModel, Note, PageGeometry
 
 
 # ---------------------------------------------------------------------------

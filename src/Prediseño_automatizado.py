@@ -27,7 +27,10 @@ import json
 import logging
 import sys
 
-from solver import PlanSettings, solve_page_layout, summarize_outcome
+if __package__:
+    from .solver import PlanSettings, solve_page_layout, summarize_outcome
+else:  # pragma: no cover - compatibilidad con ejecución directa
+    from solver import PlanSettings, solve_page_layout, summarize_outcome
 
 try:  # pragma: no cover - dependencia opcional en tiempo de ejecución
     from docx import Document  # type: ignore
