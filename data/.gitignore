@@ -1,0 +1,11 @@
+# Ignore all files in data/ except the placeholders that document the structure.
+*
+!/.gitignore
+!/layouts/
+!/layouts/.gitkeep
+!/idml/
+!/idml/.gitkeep
+!/reports/
+!/reports/.gitkeep
+!/out_txt/
+!/out_txt/.gitkeep

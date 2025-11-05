@@ -634,7 +634,8 @@ class Config:
     layout_path: Path
     pages: List[int]
     cierre_root: Path
-    output_dir: Path
+    reports_dir: Path
+    out_txt_dir: Path
     slot_selector: Dict[str, str] = field(default_factory=dict)
     typography: TextStyle = field(default_factory=TextStyle.defaults)
     image_presets: Dict[str, ImagePreset] = field(default_factory=ImagePreset.default_presets)
@@ -928,18 +929,49 @@ def prompt_inputs() -> Config:
         cleaned = raw.strip().strip('"\'')
         return Path(cleaned).expanduser().resolve()
 
-    layout_raw = input("Ruta del layout_slots.json: ")
+    project_root = Path(__file__).resolve().parent.parent
+    data_root = project_root / "data"
+
+    default_layout = data_root / "layouts" / "layout_slots.json"
+    default_cierre = data_root / "cierre"
+    default_reports = data_root / "reports"
+    default_out_txt = data_root / "out_txt"
+
+    def _display(path: Path) -> str:
+        try:
+            return str(path.relative_to(Path.cwd()))
+        except ValueError:
+            return str(path)
+
+    layout_raw = input(
+        f"Ruta del layout_slots.json (ENTER para {_display(default_layout)}): "
+    ).strip()
     pages_raw = input(
         f"Páginas a procesar (ENTER para {default_pages}): "
     ).strip()
-    cierre_raw = input("Carpeta del cierre: ")
-    output_raw = input("Carpeta de salida: ")
+    cierre_raw = input(
+        f"Carpeta del cierre (ENTER para {_display(default_cierre)}): "
+    ).strip()
+    reports_raw = input(
+        f"Carpeta para reportes (ENTER para {_display(default_reports)}): "
+    ).strip()
+    out_txt_raw = input(
+        f"Carpeta para TXT generados (ENTER para {_display(default_out_txt)}): "
+    ).strip()
     config_file_raw = input(
         "Archivo de configuración tipográfica (ENTER para defaults): "
     ).strip()
 
+    if not layout_raw:
+        layout_raw = str(default_layout)
     if not pages_raw:
         pages_raw = default_pages
+    if not cierre_raw:
+        cierre_raw = str(default_cierre)
+    if not reports_raw:
+        reports_raw = str(default_reports)
+    if not out_txt_raw:
+        out_txt_raw = str(default_out_txt)
 
     pages = [int(p.strip()) for p in pages_raw.split(",") if p.strip()]
 
@@ -959,7 +991,8 @@ def prompt_inputs() -> Config:
         layout_path=_clean_path(layout_raw),
         pages=pages,
         cierre_root=_clean_path(cierre_raw),
-        output_dir=_clean_path(output_raw),
+        reports_dir=_clean_path(reports_raw),
+        out_txt_dir=_clean_path(out_txt_raw),
         slot_selector={"layer": "ESPACIO_NOTAS"},
         typography=typography,
         image_presets=image_presets,
@@ -1009,7 +1042,7 @@ def run_pipeline(cfg: Config) -> None:
         capacity_summary[page_geom.page_number] = {"span1": base_capacity}
 
         notes = extract_notes_for_page(page_map.get(page_geom.name))
-        write_out_txt(page_geom.name, notes, cfg.output_dir)
+        write_out_txt(page_geom.name, notes, cfg.out_txt_dir)
         stats.notes_processed += len(notes)
 
         outcome = solve_page_layout(page_geom, notes, capacity_model, plan_settings)
@@ -1090,8 +1123,8 @@ def run_pipeline(cfg: Config) -> None:
 
     logging.debug("Resumen de capacidad por página: %s", capacity_summary)
 
-    save_plan_blocks_json(blocks, cfg.output_dir)
-    save_plan_blocks_csv(blocks, cfg.output_dir)
+    save_plan_blocks_json(blocks, cfg.reports_dir)
+    save_plan_blocks_csv(blocks, cfg.reports_dir)
     log_global_summary(stats)
 
 # ---------------------------------------------------------------------------
@@ -1591,10 +1624,11 @@ def extract_notes_for_page(page_dir: Optional[Path]) -> List[Note]:
     return notes
 
 
-def write_out_txt(page_name: str, notes: Sequence[Note], out_dir: Path) -> None:
-    """Escribe los archivos .txt y meta.json solicitados."""
+def write_out_txt(page_name: str, notes: Sequence[Note], out_root: Path) -> None:
+    """Escribe los archivos .txt y meta.json solicitados en ``out_root``."""
 
-    page_dir = out_dir / "out_txt" / page_name
+    out_root.mkdir(parents=True, exist_ok=True)
+    page_dir = out_root / page_name
     page_dir.mkdir(parents=True, exist_ok=True)
 
     meta = []
