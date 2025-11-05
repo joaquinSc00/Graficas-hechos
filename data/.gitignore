@@ -2,10 +2,10 @@
 *
 !/.gitignore
 !/layouts/
-!/layouts/.gitkeep
+!/layouts/**
 !/idml/
-!/idml/.gitkeep
+!/idml/**
 !/reports/
-!/reports/.gitkeep
+!/reports/**
 !/out_txt/
-!/out_txt/.gitkeep
+!/out_txt/**
