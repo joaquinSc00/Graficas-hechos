@@ -9,6 +9,25 @@ Automatizar el **armado preliminar** de cada edición del periódico en **InDesi
 * **Probar** distribuciones inteligentes hasta que “entre” lo máximo posible **sin overset**, respetando tu diseño.
 * **Ahorrarte** la primera pasada de medición/acomodo; vos luego hacés el retoque fino.
 
+### Estructura del repositorio
+
+```
+├── src/
+│   ├── Prediseño_automatizado.py
+│   └── solver.py
+└── scripts/
+    └── indesign/
+        └── auto_layout_cierre_nov.jsx
+```
+
+* `src/Prediseño_automatizado.py` contiene el andamiaje principal del pipeline en Python. Las funciones siguen siendo stubs
+  documentados, pero concentran toda la lógica de preprocesamiento pensada para ejecutarse desde la línea de comandos.
+  Ejecutalo como módulo (`python -m src.Prediseño_automatizado`) para garantizar que los imports relativos funcionen.
+* `src/solver.py` aloja el beam-search responsable de evaluar combinaciones de notas dentro de cada página.
+* `scripts/indesign/auto_layout_cierre_nov.jsx` es el ExtendScript que se ejecuta dentro de InDesign para volcar el resultado.
+
+Todos los scripts prototipo y archivos de prueba aislados se eliminaron para dejar solo los componentes necesarios del flujo actual.
+
 ### Estructura de entrada
 
 * Carpeta raíz del cierre con **subcarpetas por página** (ej.: `Pagina 2 Matorrales`, `Pagina 5 y 6 Vdr`, etc.).
@@ -66,8 +85,11 @@ Automatizar el **armado preliminar** de cada edición del periódico en **InDesi
 
 ### Herramientas auxiliares
 
-* `generate_slot_report.py`: procesa un `.idml` y genera un reporte JSON/CSV con todos los rectángulos/polígonos detectados.
-* `summarize_slots.py`: lee un `*_slots_report.json` y resume por página cuántos slots hay y qué superficie ocupan.
+* `scripts/indesign/auto_layout_cierre_nov.jsx`: script de InDesign que recibe el plan generado en Python y crea los marcos
+  finales dentro de cada slot.
+
+El resto de utilidades que se usaban como prototipos quedaron fuera del repositorio para simplificar la puesta en marcha y
+evitar archivos de datos obsoletos.
 
 ---
 
