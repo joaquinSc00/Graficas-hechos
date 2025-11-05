@@ -42,6 +42,55 @@ Automatizar el **armado preliminar** de cada edición del periódico en **InDesi
 
 Todos los directorios reales permanecen ignorados salvo por sus `.gitkeep`, de modo que los datos del cierre no se versionen.
 
+#### Formato de `plan_bloques.json`
+
+La serialización ahora expone una estructura agrupada **por nota** para que el JSX pueda conocer las geometrías individuales de título, columnas de cuerpo e imagen. El archivo es un objeto con metadatos y un arreglo `notes`:
+
+```json
+{
+  "version": 2,
+  "generated_at": "2024-05-20T12:34:56",
+  "notes": [
+    {
+      "page": 7,
+      "note_id": "Página 7#1",
+      "columns": { "start": 1, "span": 2 },
+      "frame": { "x_mm": 25.0, "y_mm": 34.0, "w_mm": 95.0, "h_mm": 180.0 },
+      "title": {
+        "rect": { "x_mm": 25.0, "y_mm": 34.0, "w_mm": 95.0, "h_mm": 18.0 },
+        "lines": 2,
+        "height_mm": 18.0
+      },
+      "body": [
+        { "column": 1, "relative_column": 0, "x_mm": 25.0, "y_mm": 52.0, "w_mm": 45.0, "h_mm": 128.0 },
+        { "column": 2, "relative_column": 1, "x_mm": 72.0, "y_mm": 52.0, "w_mm": 45.0, "h_mm": 128.0 }
+      ],
+      "image": {
+        "rect": { "x_mm": 25.0, "y_mm": 90.0, "w_mm": 95.0, "h_mm": 60.0 },
+        "mode": "horizontal",
+        "span": 2,
+        "height_mm": 60.0
+      },
+      "metrics": {
+        "body_chars_fit": 950,
+        "body_chars_overflow": 0,
+        "title_height_mm": 18.0,
+        "body_height_mm": 128.0,
+        "image_height_mm": 60.0,
+        "column_heights_mm": [210.0, 210.0],
+        "column_title_heights_mm": [18.0, 18.0],
+        "column_body_heights_mm": [128.0, 128.0],
+        "column_image_heights_mm": [60.0, 60.0],
+        "body_lines": 42.0,
+        "title_lines": 2.0
+      }
+    }
+  ]
+}
+```
+
+Cada elemento `body` representa una columna independiente y la propiedad `image` incluye sus coordenadas en milímetros junto con el `mode` detectado. El `plan_bloques.csv` refleja la misma organización con columnas agregadas para estos rectángulos en formato JSON. El script de InDesign (`scripts/indesign/auto_layout_cierre_nov.jsx`) ya consume esta estructura y crea marcos individuales por columna, enlazándolos en el orden indicado.
+
 #### Cómo se encadenan los pasos
 
 1. Ubicá los IDML y la retícula generada en `data/idml/` y `data/layouts/layout_slots.json`.

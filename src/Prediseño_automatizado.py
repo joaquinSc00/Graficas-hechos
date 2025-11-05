@@ -19,6 +19,7 @@ falta completar.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -670,6 +671,41 @@ class PageGeometry:
     slots_mm: Tuple[Tuple[float, float, float, float], ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class RectGeometry:
+    """Representa un rectángulo en milímetros."""
+
+    x_mm: float
+    y_mm: float
+    w_mm: float
+    h_mm: float
+
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            "x_mm": self.x_mm,
+            "y_mm": self.y_mm,
+            "w_mm": self.w_mm,
+            "h_mm": self.h_mm,
+        }
+
+
+@dataclass(frozen=True)
+class BodyColumnGeometry:
+    """Posición del cuerpo en una columna específica."""
+
+    column: int
+    relative_column: int
+    rect: RectGeometry
+
+    def to_dict(self) -> Dict[str, object]:
+        data: Dict[str, object] = {
+            "column": self.column,
+            "relative_column": self.relative_column,
+        }
+        data.update(self.rect.to_dict())
+        return data
+
+
 @dataclass
 class Block:
     """Bloque generado a partir de la retícula."""
@@ -696,6 +732,67 @@ class Block:
     body_lines: float = 0.0
     image_span: int = 0
     image_rect_mm: Optional[Tuple[float, float, float, float]] = None
+    title_geometry: Optional[RectGeometry] = None
+    body_geometries: Tuple[BodyColumnGeometry, ...] = field(default_factory=tuple)
+    image_geometry: Optional[RectGeometry] = None
+
+    def frame_geometry(self) -> RectGeometry:
+        """Rectángulo total asignado al bloque."""
+
+        return RectGeometry(self.x_mm, self.y_mm, self.w_mm, self.h_mm)
+
+    def to_serializable(self) -> Dict[str, object]:
+        """Convierte el bloque a la estructura de salida nueva."""
+
+        def _maybe_rect(rect: Optional[RectGeometry]) -> Optional[Dict[str, float]]:
+            return rect.to_dict() if rect else None
+
+        body = [segment.to_dict() for segment in self.body_geometries]
+
+        image_payload: Optional[Dict[str, object]]
+        if self.image_geometry:
+            image_payload = {
+                "rect": self.image_geometry.to_dict(),
+                "mode": self.img_mode,
+                "span": self.image_span,
+                "height_mm": self.image_height_mm,
+            }
+        else:
+            image_payload = None
+
+        payload: Dict[str, object] = {
+            "page": self.page,
+            "note_id": self.note_id,
+            "columns": {
+                "start": self.column_index,
+                "span": self.span,
+            },
+            "frame": self.frame_geometry().to_dict(),
+            "title": {
+                "rect": _maybe_rect(self.title_geometry),
+                "lines": self.title_lines,
+                "height_mm": self.title_height_mm,
+            }
+            if self.title_geometry
+            else None,
+            "body": body,
+            "image": image_payload,
+            "metrics": {
+                "body_chars_fit": self.body_chars_fit,
+                "body_chars_overflow": self.body_chars_overflow,
+                "title_height_mm": self.title_height_mm,
+                "body_height_mm": self.body_height_mm,
+                "image_height_mm": self.image_height_mm,
+                "column_heights_mm": list(self.column_heights_mm),
+                "column_title_heights_mm": list(self.column_title_heights_mm),
+                "column_body_heights_mm": list(self.column_body_heights_mm),
+                "column_image_heights_mm": list(self.column_image_heights_mm),
+                "body_lines": self.body_lines,
+                "title_lines": self.title_lines,
+            },
+        }
+
+        return payload
 
 
 @dataclass
@@ -1205,6 +1302,57 @@ def run_pipeline(cfg: Config) -> None:
                     assignment.image_height_mm,
                 )
 
+            title_height = max(assignment.column_title_heights_mm) if assignment.column_title_heights_mm else 0.0
+            title_geometry = (
+                RectGeometry(x_mm=x_mm, y_mm=y_mm, w_mm=block_width, h_mm=title_height)
+                if title_height > 0.0
+                else None
+            )
+
+            body_geometries: List[BodyColumnGeometry] = []
+            for offset in range(assignment.span):
+                absolute_column = assignment.column_index + offset + 1
+                column_x = x_mm + offset * column_step
+                title_offset = (
+                    assignment.column_title_heights_mm[offset]
+                    if offset < len(assignment.column_title_heights_mm)
+                    else 0.0
+                )
+                image_offset = (
+                    assignment.column_image_heights_mm[offset]
+                    if offset < len(assignment.column_image_heights_mm)
+                    else 0.0
+                )
+                body_height = (
+                    assignment.column_body_heights_mm[offset]
+                    if offset < len(assignment.column_body_heights_mm)
+                    else 0.0
+                )
+                body_y = y_mm + title_offset + image_offset
+                body_geometries.append(
+                    BodyColumnGeometry(
+                        column=absolute_column,
+                        relative_column=offset,
+                        rect=RectGeometry(
+                            x_mm=column_x,
+                            y_mm=body_y,
+                            w_mm=page_geom.column_width_mm,
+                            h_mm=body_height,
+                        ),
+                    )
+                )
+
+            image_geometry = (
+                RectGeometry(
+                    x_mm=image_rect[0],
+                    y_mm=image_rect[1],
+                    w_mm=image_rect[2],
+                    h_mm=image_rect[3],
+                )
+                if image_rect
+                else None
+            )
+
             page_blocks.append(
                 Block(
                     page=page_geom.page_number,
@@ -1229,6 +1377,9 @@ def run_pipeline(cfg: Config) -> None:
                     body_lines=assignment.body_lines,
                     image_span=assignment.image_span,
                     image_rect_mm=image_rect,
+                    title_geometry=title_geometry,
+                    body_geometries=tuple(body_geometries),
+                    image_geometry=image_geometry,
                 )
             )
 
@@ -1820,10 +1971,15 @@ def write_out_txt(page_name: str, notes: Sequence[Note], out_root: Path) -> None
 def save_plan_blocks_json(blocks: Sequence[Block], out_dir: Path) -> None:
     """Guarda el plan de bloques como JSON."""
 
-    data = [block.__dict__ for block in blocks]
+    notes = [block.to_serializable() for block in blocks]
+    payload = {
+        "version": 2,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "notes": notes,
+    }
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "plan_bloques.json").write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
@@ -1837,17 +1993,18 @@ def save_plan_blocks_csv(blocks: Sequence[Block], out_dir: Path) -> None:
         writer.writerow(
             [
                 "page",
-                "i",
-                "span",
-                "x_mm",
-                "y_mm",
-                "w_mm",
-                "h_mm",
                 "note_id",
+                "column_start",
+                "column_span",
+                "frame_rect_mm",
+                "title_rect_mm",
+                "body_rects_mm",
+                "image_rect_mm",
+                "img_mode",
+                "image_span",
                 "title_height_mm",
                 "body_height_mm",
                 "image_height_mm",
-                "img_mode",
                 "body_chars_fit",
                 "body_chars_overflow",
                 "column_heights_mm",
@@ -1856,25 +2013,32 @@ def save_plan_blocks_csv(blocks: Sequence[Block], out_dir: Path) -> None:
                 "column_image_heights_mm",
                 "title_lines",
                 "body_lines",
-                "image_span",
-                "image_rect_mm",
             ]
         )
         for block in blocks:
+            frame_rect = json.dumps(block.frame_geometry().to_dict())
+            title_rect = (
+                json.dumps(block.title_geometry.to_dict()) if block.title_geometry else ""
+            )
+            body_rects = json.dumps([segment.to_dict() for segment in block.body_geometries])
+            image_rect = (
+                json.dumps(block.image_geometry.to_dict()) if block.image_geometry else ""
+            )
             writer.writerow(
                 [
                     block.page,
+                    block.note_id or "",
                     block.column_index,
                     block.span,
-                    f"{block.x_mm:.2f}",
-                    f"{block.y_mm:.2f}",
-                    f"{block.w_mm:.2f}",
-                    f"{block.h_mm:.2f}",
-                    block.note_id or "",
+                    frame_rect,
+                    title_rect,
+                    body_rects,
+                    image_rect,
+                    block.img_mode,
+                    block.image_span,
                     f"{block.title_height_mm:.2f}",
                     f"{block.body_height_mm:.2f}",
                     f"{block.image_height_mm:.2f}",
-                    block.img_mode,
                     block.body_chars_fit,
                     block.body_chars_overflow,
                     json.dumps(list(block.column_heights_mm)),
@@ -1883,8 +2047,6 @@ def save_plan_blocks_csv(blocks: Sequence[Block], out_dir: Path) -> None:
                     json.dumps(list(block.column_image_heights_mm)),
                     f"{block.title_lines:.2f}",
                     f"{block.body_lines:.2f}",
-                    block.image_span,
-                    json.dumps(block.image_rect_mm) if block.image_rect_mm else "",
                 ]
             )
 

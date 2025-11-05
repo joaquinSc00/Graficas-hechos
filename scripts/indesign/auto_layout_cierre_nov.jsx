@@ -152,67 +152,290 @@ function readNoteTexts(outRoot, pageNum, noteId) {
   return { title: title || "", body: body || "" };
 }
 
+function parseRectLike(rectLike) {
+  if (!rectLike) return null;
+
+  var raw = rectLike;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch (e) {
+      var parts = String(raw)
+        .replace(/[\[\]()]/g, "")
+        .split(/[,\s]+/);
+      if (parts.length >= 4) {
+        raw = [parts[0], parts[1], parts[2], parts[3]];
+      }
+    }
+  }
+
+  if (!raw) return null;
+
+  if (raw.rect) {
+    return parseRectLike(raw.rect);
+  }
+
+  if (raw instanceof Array) {
+    if (raw.length < 4) return null;
+    return {
+      x_mm: parseFloat(raw[0]) || 0,
+      y_mm: parseFloat(raw[1]) || 0,
+      w_mm: parseFloat(raw[2]) || 0,
+      h_mm: parseFloat(raw[3]) || 0,
+    };
+  }
+
+  function _num(value) {
+    var n = parseFloat(value);
+    return isNaN(n) ? 0 : n;
+  }
+
+  var x = raw.hasOwnProperty("x_mm") ? raw.x_mm : raw.x;
+  var y = raw.hasOwnProperty("y_mm") ? raw.y_mm : raw.y;
+  var w = raw.hasOwnProperty("w_mm") ? raw.w_mm : raw.w;
+  if (raw.hasOwnProperty("width_mm")) w = raw.width_mm;
+  var h = raw.hasOwnProperty("h_mm") ? raw.h_mm : raw.h;
+  if (raw.hasOwnProperty("height_mm")) h = raw.height_mm;
+
+  return {
+    x_mm: _num(x),
+    y_mm: _num(y),
+    w_mm: _num(w),
+    h_mm: _num(h),
+  };
+}
+
+function rectToBounds(rect) {
+  if (!rect) return [0, 0, 0, 0];
+  var x = (rect.x_mm || 0) * MM2PT;
+  var y = (rect.y_mm || 0) * MM2PT;
+  var w = (rect.w_mm || 0) * MM2PT;
+  var h = (rect.h_mm || 0) * MM2PT;
+  return [y, x, y + h, x + w];
+}
+
+function extractPlanNotes(plan) {
+  if (!plan) return [];
+  if (plan.notes && plan.notes instanceof Array) return plan.notes;
+  if (plan.blocks && plan.blocks instanceof Array) return plan.blocks;
+  if (plan instanceof Array) return plan;
+  return [];
+}
+
+function normalizeNoteEntry(entry) {
+  if (!entry) return null;
+
+  var pageNum = parseInt(entry.page, 10);
+  if (isNaN(pageNum)) return null;
+
+  var noteId = entry.note_id || entry.id || "";
+  var columnStart = parseInt(
+    entry.column_index || (entry.columns && entry.columns.start) || 1,
+    10
+  );
+  if (isNaN(columnStart)) columnStart = 1;
+  var columnSpan = parseInt(entry.span || (entry.columns && entry.columns.span) || 1, 10);
+  if (isNaN(columnSpan) || columnSpan <= 0) columnSpan = 1;
+
+  var frameRect = parseRectLike(entry.frame || entry);
+  var titleRect = null;
+  if (entry.title) {
+    titleRect = parseRectLike(entry.title.rect ? entry.title.rect : entry.title);
+  }
+  var imageRect = null;
+  if (entry.image) {
+    imageRect = parseRectLike(entry.image.rect ? entry.image.rect : entry.image);
+  } else if (entry.image_rect_mm) {
+    imageRect = parseRectLike(entry.image_rect_mm);
+  }
+
+  var bodySegments = [];
+  if (entry.body && entry.body instanceof Array) {
+    for (var i = 0; i < entry.body.length; i++) {
+      var seg = entry.body[i] || {};
+      var segRect = parseRectLike(seg.rect ? seg.rect : seg);
+      if (!segRect) continue;
+      var segColumn = parseInt(
+        seg.column != null ? seg.column : columnStart + i,
+        10
+      );
+      if (isNaN(segColumn)) segColumn = columnStart + i;
+      var segRel = parseInt(
+        seg.relative_column != null ? seg.relative_column : i,
+        10
+      );
+      if (isNaN(segRel)) segRel = i;
+      bodySegments.push({
+        column: segColumn,
+        relative_column: segRel,
+        rect: segRect,
+      });
+    }
+  }
+
+  function _fallbackRect() {
+    if (frameRect) return frameRect;
+    if (bodySegments.length > 0) return bodySegments[0].rect;
+    if (titleRect) return titleRect;
+    if (imageRect) return imageRect;
+    return { x_mm: 0, y_mm: 0, w_mm: 0, h_mm: 0 };
+  }
+
+  if (!frameRect) {
+    var base = _fallbackRect();
+    frameRect = {
+      x_mm: base.x_mm,
+      y_mm: base.y_mm,
+      w_mm: base.w_mm,
+      h_mm: base.h_mm,
+    };
+  }
+
+  var metrics = entry.metrics || {};
+  if (!metrics.body_chars_fit && entry.body_chars_fit)
+    metrics.body_chars_fit = entry.body_chars_fit;
+  if (!metrics.body_chars_overflow && entry.body_chars_overflow)
+    metrics.body_chars_overflow = entry.body_chars_overflow;
+  if (!metrics.title_height_mm && entry.title_height_mm)
+    metrics.title_height_mm = entry.title_height_mm;
+  if (!metrics.body_height_mm && entry.body_height_mm)
+    metrics.body_height_mm = entry.body_height_mm;
+  if (!metrics.image_height_mm && entry.image_height_mm)
+    metrics.image_height_mm = entry.image_height_mm;
+  if (!metrics.title_lines && entry.title_lines)
+    metrics.title_lines = entry.title_lines;
+  if (!metrics.body_lines && entry.body_lines)
+    metrics.body_lines = entry.body_lines;
+
+  if (bodySegments.length === 0) {
+    var titleH = titleRect ? titleRect.h_mm || 0 : metrics.title_height_mm || 0;
+    var imageH = imageRect ? imageRect.h_mm || 0 : metrics.image_height_mm || 0;
+    var fallbackRect = {
+      x_mm: frameRect.x_mm,
+      y_mm: frameRect.y_mm + titleH + imageH,
+      w_mm: frameRect.w_mm,
+      h_mm: Math.max(frameRect.h_mm - titleH - imageH, 0),
+    };
+    bodySegments.push({
+      column: columnStart,
+      relative_column: 0,
+      rect: fallbackRect,
+    });
+  }
+
+  var hasBodyHeight = false;
+  for (var bi = 0; bi < bodySegments.length; bi++) {
+    if (bodySegments[bi].rect && bodySegments[bi].rect.h_mm > 0) {
+      hasBodyHeight = true;
+      break;
+    }
+  }
+  if (!hasBodyHeight) {
+    bodySegments = [
+      {
+        column: columnStart,
+        relative_column: 0,
+        rect: {
+          x_mm: frameRect.x_mm,
+          y_mm: frameRect.y_mm,
+          w_mm: frameRect.w_mm,
+          h_mm: frameRect.h_mm,
+        },
+      },
+    ];
+  }
+
+  var imageMode =
+    (entry.image && entry.image.mode) || entry.img_mode || (metrics.img_mode || "none");
+  metrics.img_mode = imageMode;
+  var imageSpan =
+    (entry.image && entry.image.span) || entry.image_span || metrics.image_span || 0;
+  metrics.image_span = imageSpan;
+
+  return {
+    page: pageNum,
+    note_id: noteId,
+    columns: { start: columnStart, span: columnSpan },
+    frame: frameRect,
+    title: titleRect ? { rect: titleRect, lines: metrics.title_lines || 0 } : null,
+    body: bodySegments,
+    image: imageRect
+      ? { rect: imageRect, mode: imageMode, span: imageSpan, height_mm: metrics.image_height_mm || 0 }
+      : null,
+    metrics: metrics,
+  };
+}
+
 // Crea marcos de título / cuerpo y opcionalmente placeholder de imagen
-function placeBlock(doc, layer, page, blk, noteTxts) {
-  var x = blk.x_mm * MM2PT,
-    y = blk.y_mm * MM2PT;
-  var w = blk.w_mm * MM2PT,
-    h = blk.h_mm * MM2PT;
+function placeNote(doc, layer, page, note, noteTxts) {
+  var frameRect = note.frame || { x_mm: 0, y_mm: 0, w_mm: 0, h_mm: 0 };
+  var frameBounds = rectToBounds(frameRect);
+  var x = frameBounds[1];
+  var y = frameBounds[0];
+  var w = frameBounds[3] - frameBounds[1];
+  var h = frameBounds[2] - frameBounds[0];
 
-  // Alturas en pt desde mm
-  var tH = (blk.title_height_mm || 0) * MM2PT;
-  var iH = (blk.image_height_mm || 0) * MM2PT;
-  var bH = h - tH - iH;
-  if (bH < 0) bH = 0;
-
-  // Grupo contenedor
   var groupItems = [];
 
   // Título
-  if (tH > 0) {
-    var tfT = page.textFrames.add(layer, {
-      geometricBounds: [y, x, y + tH, x + w],
-    });
+  var titleRect = note.title ? note.title.rect : null;
+  if (titleRect && (titleRect.h_mm || 0) > 0) {
+    var titleBounds = rectToBounds(titleRect);
+    var tfT = page.textFrames.add(layer, { geometricBounds: titleBounds });
     tfT.contents = noteTxts.title || "";
     groupItems.push(tfT);
   }
 
   // Imagen (placeholder) – si corresponde
-  if (iH > 0) {
-    var imgY = y + tH; // debajo del título
+  if (note.image && note.image.rect && (note.image.rect.h_mm || 0) > 0) {
+    var imgBounds = rectToBounds(note.image.rect);
     var rImg = page.rectangles.add(layer, {
-      geometricBounds: [imgY, x, imgY + iH, x + w],
+      geometricBounds: imgBounds,
       strokeWeight: 0.5,
     });
     rImg.fillColor = doc.swatches.itemByName("None");
     rImg.strokeColor = doc.swatches.itemByName("Black");
-    // Etiqueta con modo (horizontal/vertical/none)
     try {
-      rImg.label = "IMG:" + (blk.img_mode || "auto");
+      rImg.label = "IMG:" + (note.image.mode || "auto");
     } catch (e) {}
     groupItems.push(rImg);
   }
 
-  // Cuerpo (ajustado a body_chars_fit)
-  var bodyTop = y + tH + iH;
-  if (bH > 0) {
-    var tfB = page.textFrames.add(layer, {
-      geometricBounds: [bodyTop, x, bodyTop + bH, x + w],
-    });
-    var bodyText = noteTxts.body || "";
-    var maxChars = parseInt(blk.body_chars_fit || 0, 10);
-    if (maxChars > 0 && bodyText.length > maxChars) {
-      bodyText = bodyText.substr(0, maxChars);
+  // Cuerpo (una entrada por columna)
+  var bodySegments = note.body || [];
+  var bodyFrames = [];
+  var previousBodyFrame = null;
+  for (var i = 0; i < bodySegments.length; i++) {
+    var seg = bodySegments[i];
+    if (!seg || !seg.rect) continue;
+    if (seg.rect.h_mm <= 0 || seg.rect.w_mm <= 0) continue;
+    var segBounds = rectToBounds(seg.rect);
+    var tfB = page.textFrames.add(layer, { geometricBounds: segBounds });
+    if (previousBodyFrame) {
+      try {
+        previousBodyFrame.nextTextFrame = tfB;
+      } catch (e) {}
     }
-    tfB.contents = bodyText;
+    previousBodyFrame = tfB;
+    bodyFrames.push(tfB);
     groupItems.push(tfB);
   }
 
+  var bodyText = noteTxts.body || "";
+  var maxChars = parseInt((note.metrics && note.metrics.body_chars_fit) || 0, 10);
+  if (maxChars > 0 && bodyText.length > maxChars) {
+    bodyText = bodyText.substr(0, maxChars);
+  }
+  if (bodyFrames.length > 0) {
+    bodyFrames[0].contents = bodyText;
+  }
+
   // Etiqueta de depuración (note_id, span, etc.)
+  var span = (note.columns && note.columns.span) || 1;
   var lbl = page.textFrames.add(layer, {
     geometricBounds: [y - 4 * MM2PT, x, y, x + 30 * MM2PT],
   });
-  lbl.contents = String(blk.note_id || "") + "  [" + (blk.span || 1) + " col]";
+  lbl.contents = String(note.note_id || "") + "  [" + span + " col]";
   lbl.textFramePreferences.firstBaselineOffset = FirstBaseline.capHeight;
   lbl.fillColor = doc.swatches.itemByName("None");
   lbl.strokeColor = doc.swatches.itemByName("Black");
@@ -237,7 +460,7 @@ function placeBlock(doc, layer, page, blk, noteTxts) {
 
   // Seleccionar plan_bloques.json
   var planFile = askFile(
-    "Seleccioná plan_bloques.json (array plano de bloques)",
+    "Seleccioná plan_bloques.json (estructura por nota)",
     "*.json",
     defaults.plan
   );
@@ -249,8 +472,20 @@ function placeBlock(doc, layer, page, blk, noteTxts) {
     alert("No pude parsear el JSON:\n" + e);
     return;
   }
-  if (!plan || !(plan instanceof Array)) {
-    alert("Se esperaba un ARRAY de bloques. Revisá plan_bloques.json");
+
+  var rawNotes = extractPlanNotes(plan);
+  if (!rawNotes || !rawNotes.length) {
+    alert("plan_bloques.json no contiene notas serializadas.");
+    return;
+  }
+
+  var notes = [];
+  for (var ni = 0; ni < rawNotes.length; ni++) {
+    var normalized = normalizeNoteEntry(rawNotes[ni]);
+    if (normalized) notes.push(normalized);
+  }
+  if (!notes.length) {
+    alert("Ninguna nota pudo normalizarse desde plan_bloques.json.");
     return;
   }
 
@@ -262,11 +497,11 @@ function placeBlock(doc, layer, page, blk, noteTxts) {
 
   // Agrupar por página
   var byPage = {};
-  for (var i = 0; i < plan.length; i++) {
-    var blk = plan[i];
-    var pnum = parseInt(blk.page, 10);
+  for (var i = 0; i < notes.length; i++) {
+    var note = notes[i];
+    var pnum = parseInt(note.page, 10);
     if (!byPage[pnum]) byPage[pnum] = [];
-    byPage[pnum].push(blk);
+    byPage[pnum].push(note);
   }
 
   var layer = ensureLayer(doc, "auto_layout");
@@ -280,18 +515,20 @@ function placeBlock(doc, layer, page, blk, noteTxts) {
       $.writeln("WARNING: No encuentro la página " + pageNum + " en el doc.");
       continue;
     }
-    var blocks = byPage[p];
+    var pageNotes = byPage[p];
 
-    for (var j = 0; j < blocks.length; j++) {
-      var blk = blocks[j];
-      var txts = readNoteTexts(outRoot, pageNum, blk.note_id || "");
+    for (var j = 0; j < pageNotes.length; j++) {
+      var note = pageNotes[j];
+      var txts = readNoteTexts(outRoot, pageNum, note.note_id || "");
       try {
-        placeBlock(doc, layer, page, blk, txts);
+        placeNote(doc, layer, page, note, txts);
       } catch (e) {
-        $.writeln("ERROR ubicando bloque " + (blk.note_id || "?") + " pág " + pageNum + ": " + e);
+        $.writeln(
+          "ERROR ubicando nota " + (note.note_id || "?") + " pág " + pageNum + ": " + e
+        );
       }
     }
   }
 
-  alert("Listo. Se volcaron " + plan.length + " bloques sobre la maqueta.");
+  alert("Listo. Se volcaron " + notes.length + " notas sobre la maqueta.");
 })();
